@@ -10,19 +10,37 @@ to vet anything.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
+import os
+import platform
 import shutil
 import sys
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mig import __version__
+from mig.cli.banner import print_banner
 from mig.core.artifact import ArtifactRef, ArtifactType
 from mig.core.context import make_context
 from mig.core.pipeline import run_pipeline
 from mig.core.serde import to_json, to_jsonable
 from mig.core.verdict import Decision
+from mig.evidence.builder import build_attestation
+from mig.evidence.bundle import build_bundle, bundle_bytes, write_bundle
+from mig.evidence.canonical import canonical_bytes
+from mig.evidence.dsse import encode_envelope
+from mig.evidence.signing import (
+    HMAC_SCHEME,
+    SigningError,
+    make_signer,
+    make_verifier,
+    sign_statement,
+)
+from mig.evidence.statement import statement_from_attestation
+from mig.evidence.verify import verify_attestation
 from mig.gates import default_gates
 from mig.policy.engine import matched_rules
 from mig.policy.loader import load_policy
@@ -44,14 +62,17 @@ _DECISION_RANK = {
 
 if TYPE_CHECKING:
     from mig.core.protocols import Sandbox, Source
+    from mig.core.verdict import Verdict
+    from mig.evidence.dsse import Envelope
+    from mig.evidence.signing import Signer, Verifier
 
 #: Subcommand -> the PR that implements it. Used to print honest placeholders.
 _PENDING: dict[str, str] = {
-    "ingest": "PR7",
-    "verify": "PR7",
-    "evidence": "PR7",
     "promote": "PR8",
 }
+
+#: Signer backends selectable on the CLI (hmac is the zero-dep default).
+_SIGNER_CHOICES = ["hmac", "ed25519", "cosign"]
 
 _ARTIFACT_TYPE_CHOICES = [t.value for t in ArtifactType]
 
@@ -72,30 +93,37 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["review", "reject"],
         help="exit non-zero if the decision is at least this severe",
     )
-    scan.add_argument(
-        "--sandbox",
-        choices=["noop", "docker"],
-        default="noop",
-        help="behavioral sandbox (default: noop = loud SKIPPED)",
-    )
-    scan.add_argument("--sandbox-image", help="container image for --sandbox docker")
-    scan.add_argument(
-        "--sandbox-runtime",
-        choices=["runc", "gvisor"],
-        default="runc",
-        help="container runtime for --sandbox docker",
-    )
+    _add_sandbox_args(scan)
     scan.add_argument("--compact", action="store_true", help="emit single-line JSON")
 
     manifest = sub.add_parser("manifest", help="show the artifact manifest (JSON)")
     _add_ref_args(manifest)
     manifest.add_argument("--compact", action="store_true", help="emit single-line JSON")
 
-    ingest = sub.add_parser("ingest", help="scan + attest a reference (PR7)")
-    ingest.add_argument("ref", nargs="?")
-    ingest.add_argument("--policy")
+    ingest = sub.add_parser(
+        "ingest", help="scan + build a signed attestation (DSSE) for a reference"
+    )
+    _add_ref_args(ingest)
+    ingest.add_argument("--policy", help="policy file (.yaml/.json); default if omitted")
+    _add_sandbox_args(ingest)
+    _add_signer_args(ingest)
+    ingest.add_argument("--out", help="write the DSSE envelope here (default: stdout)")
+    ingest.add_argument("--bundle", help="also write a full evidence bundle here")
+    ingest.add_argument(
+        "--fail-on",
+        choices=["review", "reject"],
+        help="exit non-zero if the decision is at least this severe",
+    )
+    ingest.add_argument("--compact", action="store_true")
 
-    sub.add_parser("verify", help="verify a prior attestation (PR7)")
+    verify = sub.add_parser("verify", help="verify a signed attestation (DSSE/bundle)")
+    _add_ref_args(verify)
+    verify.add_argument(
+        "--attestation", required=True, help="DSSE envelope or evidence bundle to verify"
+    )
+    _add_signer_args(verify)
+    verify.add_argument("--expected-keyid", help="fail unless the envelope keyid matches")
+    verify.add_argument("--compact", action="store_true")
 
     policy = sub.add_parser("policy", help="policy tooling")
     policy.add_argument("policy_action", choices=["test"], help="policy subcommand")
@@ -104,14 +132,54 @@ def build_parser() -> argparse.ArgumentParser:
     policy.add_argument("--type", choices=_ARTIFACT_TYPE_CHOICES)
     policy.add_argument("--compact", action="store_true")
 
-    evidence = sub.add_parser("evidence", help="emit an evidence bundle (PR7)")
-    evidence.add_argument("--out")
+    evidence = sub.add_parser(
+        "evidence", help="emit a full, signed evidence bundle for a reference"
+    )
+    _add_ref_args(evidence)
+    evidence.add_argument(
+        "--policy", help="policy file (.yaml/.json); default if omitted"
+    )
+    _add_sandbox_args(evidence)
+    _add_signer_args(evidence)
+    evidence.add_argument("--out", help="write the bundle here (default: stdout)")
+    evidence.add_argument("--compact", action="store_true")
 
     promote = sub.add_parser("promote", help="promote to the trusted store (PR8)")
     promote.add_argument("ref", nargs="?")
     promote.add_argument("--attestation")
 
     return parser
+
+
+def _add_sandbox_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--sandbox",
+        choices=["noop", "docker"],
+        default="noop",
+        help="behavioral sandbox (default: noop = loud SKIPPED)",
+    )
+    parser.add_argument("--sandbox-image", help="container image for --sandbox docker")
+    parser.add_argument(
+        "--sandbox-runtime",
+        choices=["runc", "gvisor"],
+        default="runc",
+        help="container runtime for --sandbox docker",
+    )
+
+
+def _add_signer_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--signer",
+        choices=_SIGNER_CHOICES,
+        default="hmac",
+        help="signature backend (default: hmac = stdlib, integrity-only)",
+    )
+    parser.add_argument(
+        "--key", help="key file (HMAC secret / ed25519 key / cosign key ref)"
+    )
+    parser.add_argument(
+        "--cosign-bin", default="cosign", help="cosign binary for --signer cosign"
+    )
 
 
 def _add_ref_args(parser: argparse.ArgumentParser) -> None:
@@ -183,6 +251,120 @@ def _exit_code(decision: Decision, fail_on: str | None) -> int:
         return 0
     threshold = Decision.REJECT if fail_on == "reject" else Decision.REVIEW_REQUIRED
     return 1 if _DECISION_RANK[decision] >= _DECISION_RANK[threshold] else 0
+
+
+def _utc_now() -> str:
+    """ISO-8601 UTC timestamp (``...Z``) — stamped per run, caller-controlled."""
+    now = datetime.datetime.now(tz=datetime.UTC)
+    return now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _read_key_bytes(args: argparse.Namespace) -> bytes:
+    """Resolve HMAC/ed25519 key material from --key FILE or (hmac) the env.
+
+    A key file's trailing newline (what ``echo`` and most editors append) is
+    stripped so a file and ``MIG_SIGNING_KEY`` carrying the same secret produce
+    the SAME key/keyid — otherwise an honest operator gets a spurious tamper alarm.
+    """
+    if args.key:
+        try:
+            with open(args.key, "rb") as handle:
+                data = handle.read()
+        except OSError as exc:
+            raise SigningError(f"cannot read key file {args.key!r}: {exc}") from exc
+        return data.rstrip(b"\r\n")
+    if args.signer == "hmac":
+        env = os.environ.get("MIG_SIGNING_KEY")
+        if env:
+            return env.encode("utf-8")
+    hint = " or MIG_SIGNING_KEY" if args.signer == "hmac" else ""
+    raise SigningError(f"{args.signer} needs a key (--key FILE{hint})")
+
+
+def _build_signer(args: argparse.Namespace) -> Signer:
+    if args.signer == "cosign":
+        if not args.key:
+            raise SigningError("cosign signing needs --key <key-ref>")
+        return make_signer("cosign", key_ref=args.key, cosign_bin=args.cosign_bin)
+    return make_signer(args.signer, key_bytes=_read_key_bytes(args))
+
+
+def _build_verifier(args: argparse.Namespace) -> Verifier:
+    if args.signer == "cosign":
+        if not args.key:
+            raise SigningError("cosign verify needs --key <pubkey-ref>")
+        return make_verifier("cosign", key_ref=args.key, cosign_bin=args.cosign_bin)
+    return make_verifier(args.signer, key_bytes=_read_key_bytes(args))
+
+
+@dataclass
+class _Signed:
+    """In-memory result of the fetch → scan → attest → sign pipeline."""
+
+    verdict: Verdict
+    envelope: Envelope
+    decision: Decision
+    created_at: str
+    run_meta: dict[str, object]
+
+
+def _produce_signed(args: argparse.Namespace, command: str) -> _Signed:
+    """Fetch + pin + scan + attest (I5 fail-closed) + sign. Decision-only (I6).
+
+    Raises ValueError/PolicyError/SigningError/SourceError/QuarantineError on any
+    operator-facing failure; the caller maps those to exit 2.
+    """
+    ref, type_hint = _resolve_ref(args.ref, args.type, args.digest)
+    policy = _load_policy(args.policy)
+    signer = _build_signer(args)  # fail on a bad key BEFORE fetching anything
+    created_at = _utc_now()
+
+    quarantine_root = tempfile.mkdtemp(prefix="mig-quarantine-")
+    try:
+        artifact = _source_for(ref, type_hint).fetch(
+            ref, Quarantine(root=quarantine_root)
+        )
+        ctx = make_context(
+            policy=policy,
+            quarantine=Quarantine(root=quarantine_root),
+            sandbox=_build_sandbox(args),
+        )
+        verdict = run_pipeline(artifact, default_gates(), ctx)
+        confinement = getattr(
+            ctx.sandbox, "confinement_level", type(ctx.sandbox).__name__
+        )
+        attestation = build_attestation(
+            verdict,
+            artifact,
+            policy=policy,
+            mig_version=__version__,
+            confinement_level=confinement,
+            created_at=created_at,
+        )
+        statement = statement_from_attestation(attestation)
+        envelope = sign_statement(statement, signer)
+    finally:
+        shutil.rmtree(quarantine_root, ignore_errors=True)
+
+    run_meta: dict[str, object] = {
+        "run_id": ctx.run_id,
+        "command": command,
+        "policy": {"id": policy.id, "version": policy.version},
+        "sandbox": {"confinement_level": confinement},
+        "host": {"platform": sys.platform, "python": platform.python_version()},
+        "signer": {"scheme": signer.scheme, "keyid": signer.key_id},
+    }
+    return _Signed(
+        verdict=verdict,
+        envelope=envelope,
+        decision=verdict.decision,
+        created_at=created_at,
+        run_meta=run_meta,
+    )
+
+
+#: Operator-facing failures from the attest pipeline — all map to a clean exit 2.
+_ATTEST_ERRORS = (ValueError, PolicyError, SigningError, SourceError, QuarantineError)
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
@@ -289,12 +471,134 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
         shutil.rmtree(quarantine_root, ignore_errors=True)
 
 
-_COMMANDS = {"scan": _cmd_scan, "manifest": _cmd_manifest, "policy": _cmd_policy}
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    try:
+        signed = _produce_signed(args, "ingest")
+    except _ATTEST_ERRORS as exc:
+        print(f"mig ingest: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        envelope_dict = encode_envelope(signed.envelope)
+        if args.out:
+            with open(args.out, "wb") as handle:
+                handle.write(canonical_bytes(envelope_dict))
+        else:
+            print(json.dumps(envelope_dict, indent=None if args.compact else 2))
+        if args.bundle:
+            bundle = build_bundle(
+                signed.verdict,
+                signed.envelope,
+                mig_version=__version__,
+                created_at=signed.created_at,
+                run_meta=signed.run_meta,
+            )
+            write_bundle(args.bundle, bundle)
+    except OSError as exc:  # a bad/unwritable --out/--bundle path is operator error
+        print(f"mig ingest: {exc}", file=sys.stderr)
+        return 2
+    return _exit_code(signed.decision, args.fail_on)
+
+
+def _cmd_evidence(args: argparse.Namespace) -> int:
+    try:
+        signed = _produce_signed(args, "evidence")
+    except _ATTEST_ERRORS as exc:
+        print(f"mig evidence: {exc}", file=sys.stderr)
+        return 2
+
+    bundle = build_bundle(
+        signed.verdict,
+        signed.envelope,
+        mig_version=__version__,
+        created_at=signed.created_at,
+        run_meta=signed.run_meta,
+    )
+    try:
+        if args.out:
+            write_bundle(args.out, bundle)
+        else:
+            sys.stdout.write(bundle_bytes(bundle).decode("utf-8") + "\n")
+    except OSError as exc:
+        print(f"mig evidence: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    try:
+        with open(args.attestation, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        print(f"mig verify: cannot read attestation: {exc}", file=sys.stderr)
+        return 2
+    if not isinstance(data, dict):
+        print("mig verify: attestation file is not a JSON object", file=sys.stderr)
+        return 2
+
+    try:
+        ref, type_hint = _resolve_ref(args.ref, args.type, args.digest)
+        verifier = _build_verifier(args)
+    except (ValueError, SigningError) as exc:
+        print(f"mig verify: {exc}", file=sys.stderr)
+        return 2
+
+    quarantine_root = tempfile.mkdtemp(prefix="mig-quarantine-")
+    try:
+        try:
+            artifact = _source_for(ref, type_hint).fetch(
+                ref, Quarantine(root=quarantine_root)
+            )
+        except _FETCH_ERRORS as exc:
+            print(f"mig verify: {exc}", file=sys.stderr)
+            return 2
+        try:
+            result = verify_attestation(
+                data,
+                artifact=artifact,
+                verifier=verifier,
+                expected_keyid=args.expected_keyid,
+            )
+        except ValueError as exc:  # malformed envelope/bundle — operator error
+            print(f"mig verify: {exc}", file=sys.stderr)
+            return 2
+    finally:
+        shutil.rmtree(quarantine_root, ignore_errors=True)
+
+    report: dict[str, object] = {
+        "ok": result.ok,
+        "scheme": result.scheme,
+        "keyid": result.keyid,
+        "decision": result.decision,
+        "checks": dict(result.checks),
+        "problems": list(result.problems),
+    }
+    if result.scheme == HMAC_SCHEME:
+        report["warning"] = (
+            "integrity-only (shared-secret HMAC), NOT third-party provenance — "
+            "use ed25519/cosign across a trust boundary"
+        )
+    print(json.dumps(report, indent=None if args.compact else 2))
+    return 0 if result.ok else 3  # 3 = verification failure (tamper), distinct from 2
+
+
+_COMMANDS = {
+    "scan": _cmd_scan,
+    "manifest": _cmd_manifest,
+    "policy": _cmd_policy,
+    "ingest": _cmd_ingest,
+    "evidence": _cmd_evidence,
+    "verify": _cmd_verify,
+}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Cosmetic banner — stderr-only and TTY-gated, so it never touches the JSON on
+    # stdout and stays silent when redirected/piped (and under test).
+    print_banner()
 
     command: str | None = getattr(args, "command", None)
     if command is None:

@@ -35,6 +35,18 @@ $ mig scan ./path/to/server --type mcp_server   # → "decision": "review_requir
 $ mig manifest ./path/to/model                  # files + content digest
 ```
 
+Ingest produces a **signed attestation** (a DSSE-wrapped in-toto Statement) that
+binds the decision to the artifact's content digest; `verify` re-checks the
+signature, re-binds the digest, and re-asserts attribution — failing closed
+(exit `3`) on any tamper:
+
+```console
+$ export MIG_SIGNING_KEY=$(openssl rand -hex 32)
+$ mig ingest ./path/to/model --out model.dsse.json     # decision-only: signs, never promotes (I6)
+$ mig verify ./path/to/model --attestation model.dsse.json   # exit 0 verified / 3 tampered
+$ mig evidence ./path/to/model --out evidence.json     # full bundle (verdict + signed envelope)
+```
+
 ## Design invariants (non-negotiable)
 
 These are encoded as tests, not just documented:
@@ -53,8 +65,9 @@ These are encoded as tests, not just documented:
 | I10 | MIG's own dependencies are pinned, hash-checked, minimal, and audited. |
 
 The core has **zero runtime dependencies** (I10) — it is stdlib-only. Integrations
-arrive as opt-in extras (`mig[huggingface]`, `mig[scanners]`, `mig[docker]`, …)
-in their respective PRs.
+arrive as opt-in extras (`mig[huggingface]`, `mig[scanners]`, `mig[policy]`,
+`mig[signing]`) in their respective PRs. The Docker sandbox and the cosign signer
+drive host CLIs (`docker`, `cosign`) and need no Python dependency.
 
 ## The pipeline
 
@@ -78,12 +91,30 @@ fetch (digest-pinned → quarantine)
 ```
 mig scan <ref>                 # decision-only verdict (JSON)        ✓ PR2
 mig manifest <ref>             # files + content digest             ✓ PR2
-mig ingest <ref> --policy p.yaml                                     — PR5
-mig verify <ref>               # verify a prior attestation          — PR7
-mig policy test <ref> --policy p.yaml                                — PR5
-mig evidence <ref> --out evidence.zip                                — PR7
+mig policy test <ref> --policy p.yaml                                ✓ PR5
+mig ingest <ref> --signer hmac --key k   # sign a DSSE attestation  ✓ PR7
+mig verify <ref> --attestation a.dsse.json   # re-check + re-bind   ✓ PR7
+mig evidence <ref> --out evidence.json   # full signed bundle       ✓ PR7
 mig promote <ref> --attestation a.json   # separate, gated          — PR8
 ```
+
+## Attestation & signing (PR7)
+
+`ingest`/`evidence` build an [in-toto Statement v1](https://github.com/in-toto/attestation)
+carrying a MIG vetting predicate, canonicalise it, and sign the
+[DSSE](https://github.com/secure-systems-lab/dsse) Pre-Authentication Encoding.
+The signature lives only in the envelope — never inside the signed payload — and
+the artifact's content digest is the Statement subject, so it is *inside* the
+signed bytes. `verify` fails closed unless the signature is valid, the live
+re-hash matches the attested digest (I3), and every executed gate is attributed
+(I5). The verifier is always operator-chosen (`--signer`/`--key`), never selected
+from the envelope's advisory keyid.
+
+| `--signer` | needs | notes |
+|---|---|---|
+| `hmac` (default) | nothing (stdlib) | offline/airgapped; **integrity-only**, not third-party provenance — `verify` says so |
+| `ed25519` | `pip install mig[signing]` | publicly verifiable, promotion-grade |
+| `cosign` | the `cosign` binary on `PATH` | `--key` file/KMS over the same PAE (keyless/Fulcio is a non-goal) |
 
 ## Development
 
@@ -107,9 +138,9 @@ The system stays decision-only until PR8.
 - **PR3** — Quarantine + digest-pinned fetch + Hugging Face source ✓
 - **PR4** — Static scanner suite (picklescan, AST static-code, secrets, license, prompt-injection) ✓
 - **PR5** — Declarative policy engine (`--policy` / `--fail-on` / `mig policy test`) ✓
-- **PR6** — Behavioral sandbox (Docker → gVisor/Firecracker) *(next)*
-- **PR7** — Attestation & signing (in-toto / SLSA)
-- **PR8** — Trusted-store promotion (separate, gated)
+- **PR6** — Behavioral sandbox (Docker → gVisor/Firecracker) ✓
+- **PR7** — Attestation & signing (in-toto Statement + DSSE; HMAC / ed25519 / cosign) ✓
+- **PR8** — Trusted-store promotion (separate, gated) *(next)*
 
 ## License
 

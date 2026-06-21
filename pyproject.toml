@@ -43,6 +43,12 @@ dynamic = ["version"]
 huggingface = ["huggingface-hub>=0.26,<1"]
 scanners = ["picklescan>=0.0.21,<2"]
 policy = ["pyyaml>=6,<7"]
+# PR7 signing: ed25519 asymmetric attestation signatures (publicly verifiable,
+# promotion-grade). The default HMAC signer is stdlib-only and needs none of this.
+signing = ["cryptography>=43,<46"]
+# PR7 cosign: a marker extra — the cosign signer drives the host `cosign` binary
+# via subprocess and needs NO Python dependency (like the PR6 docker sandbox).
+cosign = []
 
 [project.urls]
 Homepage = "https://github.com/acidoom/mig"
@@ -74,6 +80,8 @@ dev = [
     "picklescan>=0.0.21,<2",
     # PyYAML in dev so policy tests load real YAML (PR5).
     "pyyaml>=6,<7",
+    # cryptography in dev so the suite exercises the real ed25519 path (PR7).
+    "cryptography>=43,<46",
 ]
 
 [tool.hatch.version]
@@ -128,6 +136,9 @@ select = [
 # The in-CONTAINER detonation harness intentionally deserializes (S403/S301) —
 # it runs confined, never in the host process (see I1 exemption).
 "src/mig/sandbox/_harness.py" = ["S403", "S301"]
+# The cosign signer intentionally shells out to the `cosign` CLI (S404/S603/S607);
+# argv is MIG-controlled and never shell-interpreted (mirrors docker.py).
+"src/mig/evidence/signers/cosign.py" = ["S404", "S603", "S607"]
 
 [tool.mypy]
 python_version = "3.11"

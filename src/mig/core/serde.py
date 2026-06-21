@@ -15,7 +15,7 @@ import dataclasses
 import json
 from collections.abc import Mapping
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mig.core.artifact import Artifact, ArtifactRef, ArtifactType
 from mig.core.verdict import (
@@ -27,7 +27,12 @@ from mig.core.verdict import (
     Severity,
     Verdict,
 )
-from mig.evidence.attestation import Attestation
+
+if TYPE_CHECKING:
+    # Imported lazily at runtime (inside the decoders) so the CORE never depends
+    # on the evidence layer at import time — keeps the module graph acyclic.
+    from mig.evidence.attestation import Attestation
+    from mig.evidence.dsse import Envelope
 
 # --------------------------------------------------------------------------- #
 # Encoding
@@ -118,6 +123,8 @@ def verdict_from_dict(data: Mapping[str, Any]) -> Verdict:
 
 
 def attestation_from_dict(data: Mapping[str, Any]) -> Attestation:
+    from mig.evidence.attestation import Attestation
+
     return Attestation(
         ref=artifact_ref_from_dict(data["ref"]),
         digest=data["digest"],
@@ -142,3 +149,64 @@ def verdict_from_json(text: str) -> Verdict:
     if not isinstance(parsed, dict):
         raise ValueError("expected a JSON object for a Verdict")
     return verdict_from_dict(parsed)
+
+
+# --------------------------------------------------------------------------- #
+# Decoding (PR7 on-disk evidence shapes) — typed, mirroring the above
+# --------------------------------------------------------------------------- #
+
+
+def dsse_envelope_from_dict(data: Mapping[str, Any]) -> Envelope:
+    """Reconstruct a typed DSSE :class:`Envelope` from its on-disk JSON shape."""
+    from mig.evidence.dsse import Envelope, Signature
+
+    payload_type = data.get("payloadType")
+    payload = data.get("payload")
+    if not isinstance(payload_type, str) or not isinstance(payload, str):
+        raise ValueError("DSSE envelope needs string 'payloadType' and 'payload'")
+    raw_sigs = data.get("signatures", [])
+    if not isinstance(raw_sigs, list) or not raw_sigs:
+        raise ValueError("DSSE envelope needs a non-empty 'signatures' list")
+    signatures: list[Signature] = []
+    for sig in raw_sigs:
+        # A malformed signature entry must surface as ValueError (operator error),
+        # not a bare KeyError/TypeError that escapes the CLI's handler.
+        if not isinstance(sig, Mapping) or not all(
+            isinstance(sig.get(k), str) for k in ("keyid", "sig", "scheme")
+        ):
+            raise ValueError("DSSE signature needs string 'keyid', 'sig', 'scheme'")
+        signatures.append(
+            Signature(keyid=sig["keyid"], sig=sig["sig"], scheme=sig["scheme"])
+        )
+    return Envelope(payload_type=payload_type, payload=payload, signatures=signatures)
+
+
+def statement_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate an in-toto Statement v1 dict (required keys present + shaped)."""
+    if data.get("_type") != "https://in-toto.io/Statement/v1":
+        raise ValueError("not an in-toto Statement v1 (_type)")
+    subjects = data.get("subject")
+    if not isinstance(subjects, list) or not subjects:
+        raise ValueError("statement has no subject")
+    digest = subjects[0].get("digest", {}) if isinstance(subjects[0], Mapping) else {}
+    if not isinstance(digest, Mapping) or not isinstance(digest.get("sha256"), str):
+        raise ValueError("statement subject lacks a sha256 digest")
+    if not isinstance(data.get("predicateType"), str):
+        raise ValueError("statement lacks a predicateType")
+    if not isinstance(data.get("predicate"), Mapping):
+        raise ValueError("statement lacks a predicate object")
+    return dict(data)
+
+
+def evidence_bundle_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate an evidence-bundle/v1 dict and decode its embedded parts."""
+    if data.get("schema") != "https://mig.dev/evidence-bundle/v1":
+        raise ValueError("not an evidence-bundle/v1 (schema)")
+    if not isinstance(data.get("envelope"), Mapping):
+        raise ValueError("bundle lacks an 'envelope' object")
+    if not isinstance(data.get("verdict"), Mapping):
+        raise ValueError("bundle lacks a 'verdict' object")
+    # Decode the embedded parts so a malformed bundle fails here, not downstream.
+    dsse_envelope_from_dict(data["envelope"])
+    verdict_from_dict(data["verdict"])
+    return dict(data)
