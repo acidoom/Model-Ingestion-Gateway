@@ -15,6 +15,7 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from mig import __version__
 from mig.core.artifact import ArtifactRef, ArtifactType
@@ -24,8 +25,15 @@ from mig.core.serde import to_json, to_jsonable
 from mig.gates import default_gates
 from mig.policy.schema import Policy
 from mig.sources.base import SourceError
+from mig.sources.huggingface import HuggingFaceSource
 from mig.sources.local import LocalSource
-from mig.storage.quarantine import Quarantine
+from mig.storage.quarantine import Quarantine, QuarantineError
+
+#: Fetch/staging failures that map to a clean exit-2 rather than a traceback.
+_FETCH_ERRORS = (SourceError, QuarantineError)
+
+if TYPE_CHECKING:
+    from mig.core.protocols import Source
 
 #: Subcommand -> the PR that implements it. Used to print honest placeholders.
 _PENDING: dict[str, str] = {
@@ -89,16 +97,38 @@ def _add_ref_args(parser: argparse.ArgumentParser) -> None:
 def _resolve_ref(
     ref_str: str, type_str: str | None, digest_str: str | None
 ) -> tuple[ArtifactRef, ArtifactType | None]:
+    type_hint = ArtifactType(type_str) if type_str else None
+
     if ref_str.startswith(("hf://", "huggingface://")):
-        raise ValueError("huggingface sources land in PR3; PR2 supports local paths only")
+        body = ref_str.split("://", 1)[1]
+        repo_id, _, revision = body.partition("@")
+        if not repo_id:
+            raise ValueError(
+                "huggingface reference needs a repo id, e.g. hf://org/model@<sha>"
+            )
+        ref = ArtifactRef(
+            scheme="huggingface",
+            locator=repo_id,
+            revision=revision or None,
+            expected_digest=digest_str,
+        )
+        return ref, type_hint
+
     if "://" in ref_str and not ref_str.startswith(("local://", "file://")):
         scheme = ref_str.split("://", 1)[0]
-        raise ValueError(f"unsupported scheme {scheme!r}; PR2 supports local paths only")
-    type_hint = ArtifactType(type_str) if type_str else None
+        raise ValueError(
+            f"unsupported scheme {scheme!r}; supported: local paths and hf://"
+        )
     ref = ArtifactRef(
         scheme="local", locator=ref_str, revision=None, expected_digest=digest_str
     )
     return ref, type_hint
+
+
+def _source_for(ref: ArtifactRef, type_hint: ArtifactType | None) -> Source:
+    if ref.scheme == "huggingface":
+        return HuggingFaceSource(artifact_type=type_hint)
+    return LocalSource(artifact_type=type_hint)
 
 
 def _cmd_scan(args: argparse.Namespace) -> int:
@@ -111,10 +141,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     quarantine_root = tempfile.mkdtemp(prefix="mig-quarantine-")
     try:
         try:
-            artifact = LocalSource(artifact_type=type_hint).fetch(
+            artifact = _source_for(ref, type_hint).fetch(
                 ref, Quarantine(root=quarantine_root)
             )
-        except SourceError as exc:
+        except _FETCH_ERRORS as exc:
             print(f"mig scan: {exc}", file=sys.stderr)
             return 2
         ctx = make_context(
@@ -138,10 +168,10 @@ def _cmd_manifest(args: argparse.Namespace) -> int:
     quarantine_root = tempfile.mkdtemp(prefix="mig-quarantine-")
     try:
         try:
-            artifact = LocalSource(artifact_type=type_hint).fetch(
+            artifact = _source_for(ref, type_hint).fetch(
                 ref, Quarantine(root=quarantine_root)
             )
-        except SourceError as exc:
+        except _FETCH_ERRORS as exc:
             print(f"mig manifest: {exc}", file=sys.stderr)
             return 2
         manifest = {

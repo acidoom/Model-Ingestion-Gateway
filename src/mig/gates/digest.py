@@ -12,6 +12,7 @@ import os
 
 from mig import __version__
 from mig.core.artifact import Artifact, ArtifactType
+from mig.core.hashing import digests_match
 from mig.core.verdict import (
     Finding,
     GateCost,
@@ -41,7 +42,7 @@ class DigestGate:
         evidence: dict[str, object] = {"digest": artifact.digest}
 
         expected = artifact.ref.expected_digest
-        if expected and artifact.digest != expected:
+        if expected and not digests_match(artifact.digest or "", expected):
             findings.append(
                 Finding(
                     gate_id=GATE_ID,

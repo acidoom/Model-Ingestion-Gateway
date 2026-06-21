@@ -8,10 +8,11 @@ from conftest import (
     make_model_dir,
     make_pickle_model_dir,
     make_trust_remote_code_dir,
+    safetensors_bytes,
 )
 from mig.core.artifact import Artifact, ArtifactRef
 from mig.core.context import DefaultScanContext
-from mig.core.verdict import GateStatus, RigorLevel
+from mig.core.verdict import GateStatus, RigorLevel, Severity
 from mig.gates.behavioral import BehavioralGate
 from mig.gates.digest import DigestGate
 from mig.gates.format_allowlist import FormatAllowlistGate
@@ -58,6 +59,73 @@ def test_format_gate_warns_on_trust_remote_code(
     codes = {f.code for f in result.findings}
     assert "trust_remote_code" in codes
     assert "custom_model_code" in codes  # modeling_demo.py companion
+
+
+def test_format_gate_fails_joblib_and_dill(
+    tmp_path: pathlib.Path, ctx: DefaultScanContext
+) -> None:
+    model = tmp_path / "joblib-model"
+    model.mkdir()
+    (model / "model.safetensors").write_bytes(safetensors_bytes())
+    (model / "preprocessor.joblib").write_bytes(b"\x80\x04joblib-pickle")
+    result = FormatAllowlistGate().evaluate(_fetch(tmp_path, model), ctx)
+    assert result.status is GateStatus.FAIL
+    assert any(f.code == "unsafe_serialization_format" for f in result.findings)
+
+
+def test_format_gate_warns_on_code_on_load_formats(
+    tmp_path: pathlib.Path, ctx: DefaultScanContext
+) -> None:
+    model = tmp_path / "npy-model"
+    model.mkdir()
+    (model / "model.safetensors").write_bytes(safetensors_bytes())
+    (model / "array.npy").write_bytes(b"\x93NUMPY-array")
+    result = FormatAllowlistGate().evaluate(_fetch(tmp_path, model), ctx)
+    assert result.status is GateStatus.WARN
+    assert any(f.code == "code_on_load_format" for f in result.findings)
+
+
+def test_format_gate_catches_compound_pickle_extension(
+    tmp_path: pathlib.Path, ctx: DefaultScanContext
+) -> None:
+    # model.pkl.gz must classify as the pickle it is, not be waved through as .gz.
+    model = tmp_path / "gz-model"
+    model.mkdir()
+    (model / "model.safetensors").write_bytes(safetensors_bytes())
+    (model / "weights.pkl.gz").write_bytes(b"\x1f\x8bcompressed-pickle")
+    result = FormatAllowlistGate().evaluate(_fetch(tmp_path, model), ctx)
+    assert result.status is GateStatus.FAIL
+    assert any(f.code == "unsafe_serialization_format" for f in result.findings)
+
+
+def test_format_gate_warns_on_archive(
+    tmp_path: pathlib.Path, ctx: DefaultScanContext
+) -> None:
+    model = tmp_path / "tar-model"
+    model.mkdir()
+    (model / "model.safetensors").write_bytes(safetensors_bytes())
+    (model / "extras.tar.gz").write_bytes(b"\x1f\x8barchive")
+    result = FormatAllowlistGate().evaluate(_fetch(tmp_path, model), ctx)
+    assert result.status is GateStatus.WARN
+    assert any(f.code == "archive_format" for f in result.findings)
+
+
+def test_format_gate_survives_adversarial_nested_config(
+    tmp_path: pathlib.Path, ctx: DefaultScanContext
+) -> None:
+    # A deeply-nested config.json makes json.loads raise RecursionError; the gate
+    # must NOT error out and discard the CRITICAL pickle finding (REJECT must
+    # survive, not downgrade to REVIEW_REQUIRED).
+    model = tmp_path / "evil-model"
+    model.mkdir()
+    (model / "pytorch_model.bin").write_bytes(b"\x80\x04pickle")
+    (model / "config.json").write_text("[" * 100_000 + "]" * 100_000)
+    result = FormatAllowlistGate().evaluate(_fetch(tmp_path, model), ctx)
+    assert result.status is GateStatus.FAIL
+    assert any(
+        f.code == "unsafe_serialization_format" and f.severity is Severity.CRITICAL
+        for f in result.findings
+    )
 
 
 # --- digest / manifest ------------------------------------------------------ #

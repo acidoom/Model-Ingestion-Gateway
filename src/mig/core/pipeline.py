@@ -18,6 +18,7 @@ Runner semantics (PRD §4, §7):
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -69,7 +70,10 @@ def _run_gate(gate: Gate, artifact: Artifact, ctx: ScanContext) -> GateResult:
             duration_ms=int((time.perf_counter() - start) * 1000),
         )
     if result.duration_ms is None:
-        result.duration_ms = int((time.perf_counter() - start) * 1000)
+        # Don't mutate the gate-owned result in place — return a stamped copy.
+        return dataclasses.replace(
+            result, duration_ms=int((time.perf_counter() - start) * 1000)
+        )
     return result
 
 

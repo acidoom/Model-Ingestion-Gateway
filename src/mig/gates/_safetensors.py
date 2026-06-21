@@ -67,5 +67,14 @@ def read_safetensors_header(path: str) -> dict[str, object]:
 
 
 def tensor_names(header: dict[str, object]) -> list[str]:
-    """Tensor entry names in a header (everything but the ``__metadata__`` key)."""
-    return [key for key in header if key != "__metadata__"]
+    """Tensor entry names in a header.
+
+    A tensor entry maps a name to an *object* (dtype/shape/offsets); the
+    reserved ``__metadata__`` key and any non-object value are excluded, so a
+    malformed entry is not miscounted as a tensor.
+    """
+    return [
+        key
+        for key, value in header.items()
+        if key != "__metadata__" and isinstance(value, dict)
+    ]

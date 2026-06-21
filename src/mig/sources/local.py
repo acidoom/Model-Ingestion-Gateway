@@ -10,16 +10,12 @@ and the hardened quarantine land in PR3.
 from __future__ import annotations
 
 import os
-import shutil
 from collections.abc import Sequence
 
 from mig.core.artifact import Artifact, ArtifactRef, ArtifactType
-from mig.core.hashing import hash_tree
+from mig.core.hashing import digests_match, hash_tree
 from mig.sources.base import DigestMismatchError, SourceError
-from mig.storage.quarantine import Quarantine
-
-#: File extensions that identify a weights-bearing model artifact.
-_MODEL_HINT_EXTENSIONS = {".safetensors", ".gguf", ".bin", ".pt", ".pth", ".ckpt"}
+from mig.storage.quarantine import Quarantine, stage_local_tree
 
 
 def _resolve_local_path(locator: str) -> str:
@@ -32,32 +28,13 @@ def _resolve_local_path(locator: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
 
 
-def _stage(source_path: str, dest_dir: str) -> list[str]:
-    """Copy ``source_path`` into ``dest_dir``; return sorted relative file paths."""
-    staged: list[str] = []
-    if os.path.isfile(source_path):
-        name = os.path.basename(source_path)
-        shutil.copy2(source_path, os.path.join(dest_dir, name))
-        return [name]
-    for root, _dirs, files in os.walk(source_path):
-        for name in files:
-            abs_path = os.path.join(root, name)
-            rel = os.path.relpath(abs_path, source_path)
-            target = os.path.join(dest_dir, rel)
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            shutil.copy2(abs_path, target)
-            staged.append(rel)
-    return sorted(staged)
-
-
 def infer_artifact_type(files: Sequence[str]) -> ArtifactType:
-    """Best-effort artifact-type inference for a local path (models-first).
+    """Default artifact type for a local path (models-first).
 
-    The caller can always override via an explicit type hint; this is only a
-    convenience default for ``mig scan <path>``.
+    MIG is models-first (R2): without an explicit ``--type`` a local path is
+    treated as a model. Richer inference (packages, notebooks) arrives with the
+    per-type suites in the follow-on waves.
     """
-    if any(os.path.splitext(f)[1].lower() in _MODEL_HINT_EXTENSIONS for f in files):
-        return ArtifactType.MODEL
     return ArtifactType.MODEL
 
 
@@ -76,12 +53,12 @@ class LocalSource:
             raise SourceError(f"local path not found: {source_path!r}")
 
         dest = quarantine.allocate(ref)
-        files = _stage(source_path, dest)
+        files = stage_local_tree(source_path, dest, quarantine.limits)
         if not files:
             raise SourceError(f"local path contains no files: {source_path!r}")
 
         digest = hash_tree(dest, files)
-        if ref.expected_digest and digest != ref.expected_digest:
+        if ref.expected_digest and not digests_match(digest, ref.expected_digest):
             # I3: verify the pin at fetch — a mismatch must not reach the gates.
             raise DigestMismatchError(
                 expected=ref.expected_digest, actual=digest, locator=ref.locator

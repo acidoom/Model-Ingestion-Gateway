@@ -36,6 +36,11 @@ classifiers = [
 dependencies = []
 dynamic = ["version"]
 
+[project.optional-dependencies]
+# Opt-in integrations — the core stays stdlib-only (I10). Each extra is added in
+# the PR that wires it and is locked + hash-pinned in uv.lock.
+huggingface = ["huggingface-hub>=0.26,<1"]
+
 [project.urls]
 Homepage = "https://github.com/acidoom/mig"
 Repository = "https://github.com/acidoom/mig"
@@ -102,6 +107,12 @@ explicit_package_bases = true
 namespace_packages = true
 warn_unreachable = true
 pretty = true
+
+# huggingface_hub is an optional extra (not installed in the dev/CI env); it is
+# accessed only through monkeypatchable wrappers, so treat it as untyped.
+[[tool.mypy.overrides]]
+module = ["huggingface_hub", "huggingface_hub.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
