@@ -1,0 +1,31 @@
+# Example MIG policy (PRD §8). Categorical actions only — no score thresholds.
+# Used by: mig scan <ref> --policy policies/model-ingestion.yaml
+#          mig policy test <ref> --policy policies/model-ingestion.yaml
+#
+# The embedded engine applies these on top of the built-in safety baseline
+# (gate FAILs reject; executable types need behavioral rigor, I8; warns review,
+# I9). Rules can ESCALATE the decision but never downgrade it.
+version: 1
+id: model-ingestion
+rules:
+  - id: no_pickle_models
+    when: { artifact.file_ext_in: [".pkl", ".pickle", ".bin"] }
+    action: reject
+    severity: critical
+
+  - id: require_safe_format
+    when: { artifact.type: model, artifact.format_not_in: [safetensors, gguf] }
+    action: require_review
+    severity: high
+
+  - id: executable_requires_behavioral
+    when:
+      artifact.type_in: [mcp_server, python_package, notebook]
+      rigor_below: behavioral
+    action: require_review
+    severity: high
+
+  - id: injection_is_warning
+    when: { finding.code: prompt_injection_suspected }
+    action: warn
+    severity: medium
