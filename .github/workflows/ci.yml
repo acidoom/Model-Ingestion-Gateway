@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Pin the most-privileged tool in our own build (I10): the resolver/installer
+# that reads the lockfile and verifies hashes must itself be part of the
+# audited, pinned set. Bump deliberately.
+env:
+  UV_VERSION: "0.9.30"
+  # Never silently re-resolve or mutate the locked environment in any step.
+  UV_FROZEN: "1"
+
+jobs:
+  quality:
+    name: lint · type · test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv (pinned)
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      # Install only from the locked, hashed dependency set; fail if stale (I10).
+      - name: Sync (locked, hash-checked)
+        run: uv sync --frozen --python ${{ matrix.python-version }}
+
+      - name: Lint (ruff)
+        run: uv run ruff check .
+
+      - name: Format check (ruff)
+        run: uv run ruff format --check .
+
+      - name: Type-check (mypy --strict)
+        run: uv run mypy
+
+      - name: Test (pytest)
+        run: uv run pytest
+
+  build:
+    name: build · smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv (pinned)
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      # The package itself is part of the PR1 contract: the wheel must ship
+      # py.typed, the console entry point must resolve, and import must work.
+      - name: Wheel ships py.typed (PEP 561)
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          assert "mig/py.typed" in names, names
+          print("py.typed present in", wheel)
+          PY
+
+      - name: Install built wheel in a clean env and smoke-test
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke dist/*.whl
+          /tmp/smoke/bin/python -c "import mig; print('import ok', mig.__version__)"
+          /tmp/smoke/bin/mig --version

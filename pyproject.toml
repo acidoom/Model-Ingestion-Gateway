@@ -1,0 +1,110 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mig"
+description = "Model Ingestion Gateway — vet AI artifacts before they enter trusted infrastructure."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "MIG authors" }]
+keywords = [
+    "security",
+    "supply-chain",
+    "ml",
+    "ai",
+    "model-scanning",
+    "attestation",
+    "sbom",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+# The core is intentionally stdlib-only (invariant I10: minimal, audited deps).
+# Integrations arrive as extras in their respective PRs — mig[huggingface] (PR3),
+# mig[scanners] (PR4), mig[docker] (PR6), mig[opa] / mig[s3] / mig[harbor] (PR8+).
+dependencies = []
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/acidoom/mig"
+Repository = "https://github.com/acidoom/mig"
+
+[project.scripts]
+mig = "mig.cli.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "mypy>=1.13,<2",
+    "ruff>=0.8,<1",
+]
+
+[tool.hatch.version]
+path = "src/mig/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mig"]
+
+[tool.hatch.build.targets.sdist]
+# Ship uv.lock so the audited, hash-pinned dev environment is reproducible from
+# the sdist alone (I10), and NOTICE per Apache-2.0 §4(d).
+include = [
+    "src/mig",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "pyproject.toml",
+    "uv.lock",
+]
+
+[tool.ruff]
+line-length = 90
+src = ["src", "tests"]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "C4",  # comprehensions
+    "SIM", # simplify
+    "TID", # tidy imports
+    "S",   # flake8-bandit — fast first line for I1/I10 (pickle, exec, subprocess…)
+]
+# I1/I10 guardrail: bandit (S) flags suspicious imports / dynamic execution as
+# the fast first line; tests/test_invariants.py is the hard, structural gate.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use asserts (S101) and hardcoded /tmp fixture paths (S108).
+"tests/*" = ["B011", "S101", "S108"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests"]
+mypy_path = ["src", "tests"]
+explicit_package_bases = true
+namespace_packages = true
+warn_unreachable = true
+pretty = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+filterwarnings = ["error"]
