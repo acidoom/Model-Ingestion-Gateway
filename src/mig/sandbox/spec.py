@@ -22,16 +22,30 @@ if TYPE_CHECKING:
 class SandboxSpec:
     """The confinement a behavioral gate requests for a detonation.
 
-    Defaults encode a deny-by-default posture (QS-3): no network, read-only
-    root, no mounted secrets, bounded resources and time.
+    Every default encodes a deny-by-default posture (QS-3): no network, read-only
+    root, all capabilities dropped, no new privileges, no mounted secrets, and
+    bounded memory / pids / cpu / wall-clock. The container runtime/network are
+    what *enforce* this; MIG only requests and verifies it.
     """
 
     image: str | None = None
     network: str = "none"  # "none" | "logging-proxy" — never unrestricted egress
     read_only: bool = True
+    # Reserved: MIG never mounts host secret stores into an untrusted detonation,
+    # regardless of this flag. (Drivers ignore it today; kept for forward compat.)
     mount_secrets: bool = False
     timeout_s: int = 60
-    resource_caps: Mapping[str, object] = field(default_factory=dict)
+    # Resource caps (deny-by-default).
+    memory: str = "512m"
+    cpus: str = "1.0"
+    pids_limit: int = 256
+    # Privilege caps.
+    cap_drop: tuple[str, ...] = ("ALL",)
+    no_new_privileges: bool = True
+    seccomp: str | None = (
+        None  # None = the runtime's default profile (never "unconfined")
+    )
+    runtime: str | None = None  # None = runc; "runsc" = gVisor; "kata"/firecracker later
     env: Mapping[str, str] = field(default_factory=dict)
 
 

@@ -147,6 +147,25 @@ class _PickleBomb:
         return (os.system, ("echo pwned",))
 
 
+def phone_home_pickle_bytes(
+    host: str = "127.0.0.1", port: int = 1, timeout: int = 1
+) -> bytes:
+    """Bytes of a pickle that opens a socket to ``host:port`` when loaded.
+
+    Default targets loopback:1 (instantly refused — fast + deterministic for the
+    harness unit test). The integration test passes an external host so the
+    sandbox's ``--network none`` confinement is what blocks it.
+    """
+
+    class _PhoneHome:
+        def __reduce__(self) -> tuple[object, tuple[object, ...]]:
+            import socket
+
+            return (socket.create_connection, ((host, port), timeout))
+
+    return pickle.dumps(_PhoneHome())
+
+
 def make_malicious_pickle_dir(base: pathlib.Path) -> pathlib.Path:
     """A model dir whose ``weights.pkl`` contains a code-execution opcode."""
     directory = base / "malicious-pickle"

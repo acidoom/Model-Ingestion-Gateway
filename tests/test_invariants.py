@@ -56,9 +56,14 @@ FORBIDDEN_ROOTS_STATIC = {"subprocess", "runpy"}
 #: in-host (I1). Confinement/fetch packages are intentionally excluded.
 STATIC_SURFACE_DIRS = {"core", "gates"}
 
+#: The in-container detonation harness is the ONE place MIG deliberately loads an
+#: artifact (pickle/import) — but it runs INSIDE the confined sandbox container,
+#: never in the host process, so it is exempt from the host-side I1 guard.
+_DETONATION_HARNESS = SRC / "sandbox" / "_harness.py"
+
 
 def _source_modules() -> list[pathlib.Path]:
-    return sorted(SRC.rglob("*.py"))
+    return [p for p in sorted(SRC.rglob("*.py")) if p != _DETONATION_HARNESS]
 
 
 def _is_static_surface(path: pathlib.Path) -> bool:
