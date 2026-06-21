@@ -17,8 +17,7 @@ class DigestMismatchError(SourceError):
     """Raised when fetched bytes do not match the pinned digest/SHA (I3).
 
     A digest mismatch is non-negotiable: the artifact MUST NOT proceed past
-    fetch. This is distinct from a *missing* pin, which sources should also
-    reject rather than silently fetch unpinned.
+    fetch.
     """
 
     def __init__(self, *, expected: str, actual: str, locator: str) -> None:
@@ -31,4 +30,10 @@ class DigestMismatchError(SourceError):
 
 
 class UnpinnedReferenceError(SourceError):
-    """Raised when a reference lacks the revision/digest needed to pin it (I3)."""
+    """Raised by sources that *require* an explicit pin (I3).
+
+    Note: a source may instead **resolve-then-pin** — e.g. the Hugging Face
+    source resolves a mutable revision to an immutable commit SHA at fetch and
+    records it — which also satisfies I3 without raising this. This error is for
+    sources where no immutable anchor can be derived from an unpinned reference.
+    """

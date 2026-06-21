@@ -8,6 +8,7 @@ via mypy and structurally via ``isinstance``).
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import struct
 from collections.abc import Mapping
@@ -82,6 +83,21 @@ def make_artifact(
 # --------------------------------------------------------------------------- #
 
 
+def safetensors_bytes(
+    *,
+    tensor_bytes: bytes = b"\x00\x00\x00\x00",
+    metadata: dict[str, str] | None = None,
+) -> bytes:
+    """The bytes of a minimal, well-formed safetensors file (one F32 tensor)."""
+    header: dict[str, object] = {
+        "weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, len(tensor_bytes)]}
+    }
+    if metadata is not None:
+        header["__metadata__"] = metadata
+    raw = json.dumps(header).encode("utf-8")
+    return struct.pack("<Q", len(raw)) + raw + tensor_bytes
+
+
 def write_safetensors(
     path: pathlib.Path,
     *,
@@ -89,16 +105,7 @@ def write_safetensors(
     metadata: dict[str, str] | None = None,
 ) -> None:
     """Write a minimal, well-formed safetensors file (one F32 tensor)."""
-    header: dict[str, object] = {
-        "weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, len(tensor_bytes)]}
-    }
-    if metadata is not None:
-        header["__metadata__"] = metadata
-    raw = json.dumps(header).encode("utf-8")
-    with open(path, "wb") as handle:
-        handle.write(struct.pack("<Q", len(raw)))
-        handle.write(raw)
-        handle.write(tensor_bytes)
+    path.write_bytes(safetensors_bytes(tensor_bytes=tensor_bytes, metadata=metadata))
 
 
 def make_model_dir(
@@ -124,6 +131,35 @@ def make_pickle_model_dir(base: pathlib.Path) -> pathlib.Path:
     (directory / "pytorch_model.bin").write_bytes(b"\x80\x04unsafe-pickle")
     (directory / "config.json").write_text(json.dumps({"model_type": "demo"}))
     return directory
+
+
+def install_fake_hf_hub(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    sha: str,
+    files: dict[str, bytes],
+) -> None:
+    """Monkeypatch the HF source wrappers so tests need neither the library nor
+    the network. ``fake_download`` writes ``files`` into the quarantine dir.
+    """
+    declared = [(path, len(data)) for path, data in files.items()]
+
+    def fake_resolve(
+        repo_id: str, revision: str | None, token: str | None
+    ) -> tuple[str, list[tuple[str, int]]]:
+        return sha, declared
+
+    def fake_download(repo_id: str, sha_value: str, dest: str, token: str | None) -> None:
+        for path, data in files.items():
+            target = os.path.join(dest, path)
+            parent = os.path.dirname(target)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(target, "wb") as handle:
+                handle.write(data)
+
+    monkeypatch.setattr("mig.sources.huggingface.resolve_commit", fake_resolve)
+    monkeypatch.setattr("mig.sources.huggingface.download_snapshot", fake_download)
 
 
 def make_trust_remote_code_dir(base: pathlib.Path) -> pathlib.Path:

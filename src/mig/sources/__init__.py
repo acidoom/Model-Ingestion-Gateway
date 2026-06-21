@@ -12,6 +12,7 @@ from mig.sources.base import (
     SourceError,
     UnpinnedReferenceError,
 )
+from mig.sources.huggingface import HuggingFaceError, HuggingFaceSource
 from mig.sources.local import LocalSource
 
 __all__ = [
@@ -19,4 +20,6 @@ __all__ = [
     "DigestMismatchError",
     "UnpinnedReferenceError",
     "LocalSource",
+    "HuggingFaceSource",
+    "HuggingFaceError",
 ]

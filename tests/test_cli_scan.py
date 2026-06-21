@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import sys
+import tempfile
 from typing import Any
 
 import pytest
 
-from conftest import make_model_dir, make_pickle_model_dir
+from conftest import (
+    install_fake_hf_hub,
+    make_model_dir,
+    make_pickle_model_dir,
+    make_trust_remote_code_dir,
+    safetensors_bytes,
+)
 from mig.cli.main import main
 
 
@@ -63,12 +72,39 @@ def test_scan_missing_path_is_an_error(
     assert "not found" in err
 
 
-def test_scan_rejects_remote_scheme_until_pr3(
+def test_scan_unsupported_scheme_errors(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    code, _out, err = _run(["scan", "hf://org/model"], capsys)
+    code, _out, err = _run(["scan", "s3://bucket/model"], capsys)
     assert code == 2
-    assert "PR3" in err
+    assert "unsupported scheme" in err
+
+
+def test_scan_huggingface_ref_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_fake_hf_hub(
+        monkeypatch,
+        sha="a" * 40,
+        files={
+            "model.safetensors": safetensors_bytes(),
+            "config.json": b'{"model_type": "demo"}',
+        },
+    )
+    code, out, _ = _run(["scan", "hf://org/model@main"], capsys)
+    assert code == 0
+    verdict: dict[str, Any] = json.loads(out)
+    assert verdict["ref"]["scheme"] == "huggingface"
+    assert verdict["ref"]["revision"] == "a" * 40  # pinned SHA in the verdict
+    assert verdict["decision"] == "approve"
+
+
+def test_scan_hf_missing_repo_id_errors(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, _out, err = _run(["scan", "hf://"], capsys)
+    assert code == 2
+    assert "repo id" in err
 
 
 def test_compact_output_is_single_line(
@@ -88,3 +124,79 @@ def test_manifest_lists_files_and_digest(
     assert set(manifest["files"]) == {"model.safetensors", "config.json"}
     assert manifest["digest"].startswith("sha256:")
     assert manifest["artifact_type"] == "model"
+
+
+def test_scan_with_correct_digest_pin_succeeds(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    model = make_model_dir(tmp_path)
+    _code, out, _ = _run(["manifest", str(model)], capsys)
+    digest = json.loads(out)["digest"]
+    code, _out, _err = _run(["scan", str(model), "--digest", digest], capsys)
+    assert code == 0  # I3: a correct pin verifies and the scan proceeds
+
+
+def test_scan_with_wrong_digest_pin_errors(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _out, err = _run(
+        ["scan", str(make_model_dir(tmp_path)), "--digest", "sha256:" + "0" * 64],
+        capsys,
+    )
+    assert code == 2
+    assert "mismatch" in err
+
+
+def test_scan_cleans_up_quarantine(
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[str] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def spy(
+        suffix: str | None = None,
+        prefix: str | None = None,
+        dir: str | None = None,
+    ) -> str:
+        path = real_mkdtemp(suffix, prefix, dir)
+        created.append(path)
+        return path
+
+    monkeypatch.setattr(tempfile, "mkdtemp", spy)
+    _run(["scan", str(make_model_dir(tmp_path))], capsys)
+    assert created  # the CLI did allocate a quarantine
+    assert not os.path.exists(created[0])  # ...and cleaned it up
+
+
+def test_pickle_scan_short_circuits_behavioral(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _code, out, _ = _run(["scan", str(make_pickle_model_dir(tmp_path))], capsys)
+    verdict: dict[str, Any] = json.loads(out)
+    gate_ids = [g["gate_id"] for g in verdict["gate_results"]]
+    assert "behavioral" not in gate_ids  # expensive gate skipped after cheap FAIL
+
+
+def test_scan_trust_remote_code_is_review_required(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # I9: a WARN (trust_remote_code) reduces to review at the CLI, not reject.
+    _code, out, _ = _run(["scan", str(make_trust_remote_code_dir(tmp_path))], capsys)
+    assert json.loads(out)["decision"] == "review_required"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlinks")
+def test_scan_artifact_with_symlink_errors(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "model.safetensors").write_bytes(safetensors_bytes())
+    outside = tmp_path / "secret"
+    outside.write_bytes(b"secret")
+    (model / "link").symlink_to(outside)
+    code, _out, err = _run(["scan", str(model)], capsys)
+    assert code == 2  # QuarantineError surfaces as a clean failure
+    assert "symlink" in err

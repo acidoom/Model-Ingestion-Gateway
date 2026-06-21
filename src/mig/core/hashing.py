@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from collections.abc import Iterable
 
 #: Read granularity for streaming hashes (1 MiB).
@@ -19,6 +20,28 @@ CHUNK_SIZE = 1024 * 1024
 
 #: Algorithm label prefix on every digest we emit.
 _ALGO = "sha256"
+
+_BARE_HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def normalize_digest(value: str) -> str:
+    """Canonicalise a digest to ``algo:lowerhex``.
+
+    Accepts a bare 64-char hex string (as printed by ``sha256sum``) and assumes
+    sha256, so a correct pin in either form compares equal.
+    """
+    text = value.strip()
+    if _BARE_HEX64.match(text):
+        return f"{_ALGO}:{text.lower()}"
+    algo, sep, hexpart = text.partition(":")
+    if sep:
+        return f"{algo.lower()}:{hexpart.lower()}"
+    return text.lower()
+
+
+def digests_match(computed: str, expected: str) -> bool:
+    """True if two digests are equal after normalisation (algo/case/prefix)."""
+    return normalize_digest(computed) == normalize_digest(expected)
 
 
 def hash_file(path: str, *, chunk_size: int = CHUNK_SIZE) -> str:

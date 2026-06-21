@@ -6,6 +6,20 @@ and ``promote()`` — the **only** path with write access (I6) — arrive in PR8
 
 from __future__ import annotations
 
-from mig.storage.quarantine import Quarantine
+from mig.storage.quarantine import (
+    DEFAULT_LIMITS,
+    Quarantine,
+    QuarantineError,
+    QuarantineLimits,
+    safe_join,
+    stage_local_tree,
+)
 
-__all__ = ["Quarantine"]
+__all__ = [
+    "Quarantine",
+    "QuarantineLimits",
+    "QuarantineError",
+    "DEFAULT_LIMITS",
+    "safe_join",
+    "stage_local_tree",
+]
