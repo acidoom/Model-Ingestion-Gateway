@@ -60,7 +60,7 @@ s3 = ["boto3>=1.34,<2"]
 harbor = ["oras>=0.2,<1"]
 
 [project.urls]
-Homepage = "https://carc.ai"
+Homepage = "https://x.com/carc_ai"
 Repository = "https://github.com/acidoom/Model-Ingestion-Gateway"
 
 [project.scripts]
