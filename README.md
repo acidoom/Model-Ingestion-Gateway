@@ -17,48 +17,17 @@ platform — without coupling to any one deployment.
 The **core is stdlib-only** (zero runtime dependencies); every integration is an
 opt-in extra. Apache-2.0.
 
+<p align="center">
+  <img src="docs/overview.png" alt="MIG overview — untrusted sources → quarantined gateway (seven gates) → signed promotion → trusted platform" width="640">
+</p>
+
 ## Reference architecture
 
 Public registries are Zone 1 (untrusted, pull-only). The gateway (Zone 2) is a
 quarantined DMZ running a sequential, fail-closed inspection pipeline; only a
 clean pass is signed and promoted into the trusted platform (Zone 3).
 
-```mermaid
-flowchart LR
-    subgraph Z1["ZONE 1 — Untrusted sources (pull-only)"]
-        direction TB
-        HF[Hugging Face Hub] ~~~ PY[PyPI] ~~~ NP[npm] ~~~ GH[GitHub] ~~~ OCI[OCI registries]
-    end
-
-    subgraph Z2["ZONE 2 — Model Ingestion Gateway (DMZ / quarantine)"]
-        direction TB
-        Q["Land in quarantine<br/>digest-pinned · object-locked · no execution"]
-        G1["G1 · Provenance &amp; reputation<br/>(integration point)"]
-        G2["G2 · Format allowlist<br/>safetensors / GGUF · pickle banned"]
-        G3["G3 · Static analysis<br/>picklescan · AST · secrets · license · injection"]
-        G4["G4 · Signature &amp; attestation<br/>DSSE in-toto · re-bind digest"]
-        G5["G5 · Behavioural sandbox<br/>Docker / gVisor · no egress"]
-        G6["G6 · Policy gate<br/>embedded floor + OPA (deny-overrides)"]
-        G7["G7 · Human review<br/>(integration point)"]
-        SIGN["Sign &amp; promote<br/>cosign / HSM · attach attestation"]
-        Q --> G1 --> G2 --> G3 --> G4 --> G5 --> G6 --> G7 --> SIGN
-    end
-
-    subgraph Z3["ZONE 3 — Trusted platform"]
-        direction TB
-        HB["Harbor registry<br/>signed artifacts only · digest-verified on pull"]
-        IN[Inference clusters] ~~~ TR[Training &amp; eval] ~~~ VX[Vector indexers]
-    end
-
-    subgraph X["Cross-cutting"]
-        direction LR
-        SIEM[SIEM · audit &amp; IoCs] ~~~ OPA[OPA policy repo] ~~~ KC[Keycloak · identity]
-    end
-
-    Z1 -- "pull only" --> Q
-    SIGN -- "promote · signed" --> HB
-    G3 -. "reject + IoC" .-> SIEM
-```
+![Model Ingestion Gateway — reference architecture: three zones, a G1–G7 inspection pipeline, and cross-cutting SIEM / OPA / Keycloak](docs/architecture.png)
 
 > The diagram is the **reference deployment architecture**. This repository is the
 > **gateway core** — it implements the quarantine, gates **G2–G6**, the signed
@@ -220,6 +189,141 @@ mig verify <ref>          re-check signature + re-bind digest + attribution --at
 mig evidence <ref>        emit a full signed evidence bundle                --out
 mig promote <ref>         gated write into the trusted store                --attestation --store-root --opa
 ```
+
+## Using MIG as a library (Python)
+
+MIG is a library first — the CLI is a thin wrapper. Embed the same vetting logic
+in a CI step, a Kubernetes admission webhook, or an agent/MLOps guard. The
+snippets below run against the real API and the inline comments show their actual
+output (the Docker example needs a daemon and is illustrative).
+
+### Scan an artifact and read the verdict
+
+```python
+from mig import make_context, run_pipeline
+from mig.core.artifact import ArtifactRef
+from mig.gates import default_gates
+from mig.policy.schema import Policy
+from mig.sources.local import LocalSource
+from mig.storage.quarantine import Quarantine
+
+quarantine = Quarantine(root="/tmp/mig-q")
+ref = ArtifactRef(scheme="local", locator="./sentiment-model")
+artifact = LocalSource().fetch(ref, quarantine)        # digest-pinned into quarantine (I3)
+
+ctx = make_context(policy=Policy(id="default", version="1"), quarantine=quarantine)
+verdict = run_pipeline(artifact, default_gates(), ctx)
+
+print(verdict.decision.value)        # 'approve'
+print(verdict.rigor_summary().value) # 'static'
+print(artifact.digest)               # 'sha256:96fc78750744eb81520be011be3f84265bc345f384481102b69551647a53205e'
+print(verdict.behavioral_ran())      # False  (default NoopSandbox — loud SKIPPED, I7)
+```
+
+### Apply a stricter policy (a safety floor — rules can only escalate)
+
+```python
+from mig.policy.schema import Policy, PolicyRule, PolicyAction
+from mig.core.verdict import Severity
+
+policy = Policy(id="strict-prod", version="2", rules=(
+    PolicyRule(id="require-license", when={"finding.code_in": ["no_license"]},
+               action=PolicyAction.REQUIRE_REVIEW, severity=Severity.LOW),
+))
+verdict = run_pipeline(artifact, default_gates(), make_context(policy=policy, quarantine=quarantine))
+print(verdict.decision.value)        # 'review_required'  (escalated; never downgraded)
+```
+
+`when` supports `artifact.type` / `artifact.type_in` / `artifact.file_ext_in` /
+`artifact.format_not_in` / `rigor_below` / `finding.code` / `finding.code_in` /
+`finding.severity_at_least` / `gate_failed`. Or load one from YAML/JSON with
+`mig.policy.loader.load_policy("policy.yaml")` (`mig[policy]` for YAML).
+
+### Add your own gate (just match the `Gate` protocol)
+
+```python
+from mig.core.artifact import ArtifactType
+from mig.core.verdict import GateCost, GateResult, GateStatus, RigorLevel
+
+class WeightSizeGate:
+    id = "weight_size"
+    cost = GateCost.CHEAP                       # CHEAP → MEDIUM → EXPENSIVE ordering
+    applies_to = frozenset(ArtifactType)        # which artifact types it runs on
+
+    def evaluate(self, artifact, ctx) -> GateResult:
+        weights = [f for f in artifact.files if f.endswith(".safetensors")]
+        return GateResult(gate_id=self.id, status=GateStatus.PASS, rigor=RigorLevel.STATIC,
+                          scanner_name="example.weight_size", scanner_version="1",
+                          evidence={"weight_files": weights})
+
+verdict = run_pipeline(artifact, [*default_gates(), WeightSizeGate()], ctx)
+```
+
+### Use a real behavioural sandbox (Docker / gVisor)
+
+```python
+from mig.sandbox.docker import DockerSandbox
+
+# Detonate executable types under confinement (--network none, read-only, caps
+# dropped, non-root). Needs the `docker` binary; runtime="runsc" selects gVisor.
+ctx = make_context(policy=Policy(id="default", version="1"), quarantine=quarantine,
+                   sandbox=DockerSandbox(runtime="runsc"))
+verdict = run_pipeline(mcp_server_artifact, default_gates(), ctx)
+# now the behavioral gate runs at BEHAVIORAL rigor → an executable type can APPROVE (I8)
+```
+
+### Build, sign, and verify an attestation
+
+```python
+import os
+from mig.evidence.builder import build_attestation
+from mig.evidence.statement import statement_from_attestation
+from mig.evidence.signing import (HMACSigner, HMACVerifier, sign_statement,
+                                   verify_envelope, VerificationError)
+
+key = os.urandom(32)                                # or load an ed25519 key (mig[signing])
+attestation = build_attestation(verdict, artifact, policy=policy, mig_version="1.0",
+                                confinement_level="noop",
+                                created_at="2026-06-21T00:00:00Z")   # refuses under-attributed vetting (I5)
+envelope = sign_statement(statement_from_attestation(attestation), HMACSigner(key))
+
+statement = verify_envelope(envelope, HMACVerifier(key))             # raises on any tamper
+print(statement["predicate"]["decision"])           # 'approve'
+try:
+    verify_envelope(envelope, HMACVerifier(b"x" * 32))               # wrong key
+except VerificationError:
+    print("rejected")                               # 'rejected'
+```
+
+### Gate a promotion into the trusted store
+
+```python
+import json
+from mig.evidence.dsse import encode_envelope
+from mig.evidence.signing import make_verifier
+from mig.promotion import promote_artifact, make_promotion_gate, make_trusted_store
+from mig.promotion.audit import PromotionAuditSink
+
+with open("att.dsse.json", "w") as fh:
+    json.dump(encode_envelope(envelope), fh)
+
+result = promote_artifact(
+    ref,
+    attestation_path="att.dsse.json",
+    verifier=make_verifier("hmac", key_bytes=key),
+    store=make_trusted_store("local", root="./trusted"),
+    gate=make_promotion_gate(),                      # embedded floor (offline); add opa="cli" for OPA
+    source=LocalSource(),
+    audit=PromotionAuditSink("./trusted"),
+    mig_version="1.0",
+)
+print(result.outcome, result.exit_code, result.store_uri)
+# promoted 0 mig-trusted://sha256/96fc78750744eb81520be011be3f84265bc345f384481102b69551647a53205e
+```
+
+`promote_artifact` re-runs verification and the deny-overrides gate *before* the
+single store write, and never raises — it returns a `PromotionResult` with the
+contract exit code (`0/1/2/3`) and always audits the attempt.
 
 ## Design invariants (non-negotiable — encoded as tests)
 
