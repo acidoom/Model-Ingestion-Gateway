@@ -40,6 +40,7 @@ dynamic = ["version"]
 # Opt-in integrations — the core stays stdlib-only (I10). Each extra is added in
 # the PR that wires it and is locked + hash-pinned in uv.lock.
 huggingface = ["huggingface-hub>=0.26,<1"]
+scanners = ["picklescan>=0.0.21,<2"]
 
 [project.urls]
 Homepage = "https://github.com/acidoom/mig"
@@ -48,11 +49,27 @@ Repository = "https://github.com/acidoom/mig"
 [project.scripts]
 mig = "mig.cli.main:main"
 
+# Built-in gates are also exposed as entry-points so an installed extra (or a
+# third party) can be discovered through the plugin registry, not just the
+# hard-wired default_gates() list.
+[project.entry-points."mig.gates"]
+format_allowlist = "mig.gates.format_allowlist:FormatAllowlistGate"
+digest = "mig.gates.digest:DigestGate"
+serialization_safety = "mig.gates.serialization_safety:SerializationSafetyGate"
+secrets = "mig.gates.secrets:SecretsGate"
+license_metadata = "mig.gates.license_metadata:LicenseMetadataGate"
+static_code = "mig.gates.static_code:StaticCodeGate"
+prompt_injection = "mig.gates.prompt_injection:PromptInjectionGate"
+behavioral = "mig.gates.behavioral:BehavioralGate"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3,<9",
     "mypy>=1.13,<2",
     "ruff>=0.8,<1",
+    # Scanners MIG wraps are installed in dev so the test suite exercises real
+    # detection against the known-bad fixture corpus (PR4 acceptance).
+    "picklescan>=0.0.21,<2",
 ]
 
 [tool.hatch.version]
@@ -95,8 +112,9 @@ select = [
 # the fast first line; tests/test_invariants.py is the hard, structural gate.
 
 [tool.ruff.lint.per-file-ignores]
-# Tests legitimately use asserts (S101) and hardcoded /tmp fixture paths (S108).
-"tests/*" = ["B011", "S101", "S108"]
+# Tests legitimately use asserts (S101), hardcoded /tmp fixture paths (S108), and
+# build a malicious pickle fixture on purpose (S301/S403) as the detection oracle.
+"tests/*" = ["B011", "S101", "S108", "S301", "S403"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -108,10 +126,10 @@ namespace_packages = true
 warn_unreachable = true
 pretty = true
 
-# huggingface_hub is an optional extra (not installed in the dev/CI env); it is
-# accessed only through monkeypatchable wrappers, so treat it as untyped.
+# Wrapped third-party scanners ship no type stubs; they are accessed only through
+# narrow wrappers, so treat them as untyped rather than failing strict mode.
 [[tool.mypy.overrides]]
-module = ["huggingface_hub", "huggingface_hub.*"]
+module = ["huggingface_hub", "huggingface_hub.*", "picklescan", "picklescan.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

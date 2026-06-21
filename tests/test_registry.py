@@ -54,7 +54,8 @@ def test_factory_helpers_have_expected_groups() -> None:
 
 
 def test_discover_with_no_entrypoints_is_empty() -> None:
-    # No mig.gates entry-points are installed in the test env.
-    reg = gate_registry()
+    # A group with no registered entry-points discovers nothing. (mig.gates DOES
+    # register the built-in gates — covered in test_static_scanners.)
+    reg: Registry[object] = Registry(group="mig.group_with_no_plugins")
     reg.discover()
     assert reg.names() == []

@@ -104,9 +104,9 @@ The system stays decision-only until PR8.
 
 - **PR1** — Core contracts & scaffolding ✓
 - **PR2** — Pipeline runner + walking skeleton (`mig scan` end-to-end) ✓
-- **PR3** — Quarantine + digest-pinned fetch + Hugging Face source *(next)*
-- **PR4** — Static scanner suite (wrap picklescan/modelscan, secrets, AST)
-- **PR5** — Declarative policy engine
+- **PR3** — Quarantine + digest-pinned fetch + Hugging Face source ✓
+- **PR4** — Static scanner suite (picklescan, AST static-code, secrets, license, prompt-injection) ✓
+- **PR5** — Declarative policy engine *(next)*
 - **PR6** — Behavioral sandbox (Docker → gVisor/Firecracker)
 - **PR7** — Attestation & signing (in-toto / SLSA)
 - **PR8** — Trusted-store promotion (separate, gated)
