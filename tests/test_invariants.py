@@ -218,6 +218,91 @@ def test_no_core_module_exercises_trusted_store_write() -> None:
                     )
 
 
+# --- I6 (PR8): promotion is the SOLE gated writer; ingest can't reach it ----- #
+
+
+def _imports_promotion(path: pathlib.Path) -> bool:
+    """True if ``path`` imports anything under ``mig.promotion`` (any form)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+            "mig.promotion"
+        ):
+            return True
+        if isinstance(node, ast.Import) and any(
+            a.name.startswith("mig.promotion") for a in node.names
+        ):
+            return True
+    return False
+
+
+def test_only_promotion_package_imports_the_writer() -> None:
+    """I6: the trusted-store writer lives in ``mig.promotion``, and ONLY that
+    package (plus the delegating CLI) may import it — an AST import check, so name
+    aliasing cannot evade it. The TrustedStore *protocol* in core/protocols.py
+    defines the seam without importing the writer, so it is unaffected."""
+    promotion = SRC / "promotion"
+    cli_main = SRC / "cli" / "main.py"
+    offenders = [
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if not (promotion in path.parents or path == cli_main)
+        and _imports_promotion(path)
+    ]
+    assert offenders == [], f"I6: mig.promotion imported outside the writer: {offenders}"
+
+
+def test_core_and_evidence_do_not_import_promotion() -> None:
+    """I6 (two-way wall): the ingest path cannot even import the writer."""
+    for subdir in ("core", "evidence"):
+        for path in (SRC / subdir).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    assert not (node.module or "").startswith("mig.promotion"), (
+                        f"{path.name} imports mig.promotion on the ingest path (I6)"
+                    )
+                elif isinstance(node, ast.Import):
+                    assert not any(
+                        a.name.startswith("mig.promotion") for a in node.names
+                    ), f"{path.name} imports mig.promotion on the ingest path (I6)"
+
+
+def test_promote_is_unreachable_without_verify() -> None:
+    """I6: in the orchestrator, the store write is lexically AFTER
+    ``verify_attestation`` and dominated by a ``not result.ok`` early return —
+    'you cannot promote what wasn't verified', encoded as structure."""
+    src = (SRC / "promotion" / "promote.py").read_text(encoding="utf-8")
+    verify_at = src.index("verify_attestation(")
+    write_at = src.index("store.write(")
+    assert verify_at < write_at, "store.write must come after verify_attestation"
+    assert "if not result.ok" in src[verify_at:write_at], (
+        "the store write must be guarded by a 'not result.ok' early return"
+    )
+
+
+def test_promotion_default_path_is_stdlib_only() -> None:
+    """I10: no module under promotion/ imports a third-party dep at module scope;
+    the OPA backend is lazy-imported by make_promotion_gate."""
+    forbidden = {"cryptography", "boto3", "requests", "oras"}
+    for path in (SRC / "promotion").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in tree.body:  # module-scope statements only
+            if isinstance(node, ast.Import):
+                assert not any(a.name.split(".")[0] in forbidden for a in node.names), (
+                    f"{path.name} imports a third-party dep at module scope (I10)"
+                )
+            elif isinstance(node, ast.ImportFrom):
+                assert (node.module or "").split(".")[0] not in forbidden, (
+                    f"{path.name} imports a third-party dep at module scope (I10)"
+                )
+    gate_tree = ast.parse((SRC / "promotion" / "gate.py").read_text(encoding="utf-8"))
+    for node in gate_tree.body:  # opa must be lazy (function-scope), not module-scope
+        assert not (isinstance(node, ast.ImportFrom) and "opa" in (node.module or "")), (
+            "gate.py imports the OPA backend at module scope (must be lazy)"
+        )
+
+
 # --- I8: executable types need behavioral rigor ----------------------------- #
 
 

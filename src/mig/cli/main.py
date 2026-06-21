@@ -1,10 +1,10 @@
 """The ``mig`` command-line entry point (PRD §15).
 
-Implemented: ``scan`` (decision-only verdict JSON, with ``--policy``/``--fail-on``,
-PR2/PR5), ``manifest`` (PR2), ``policy test`` (PR5). The remaining subcommands
-land later — ``ingest``/``verify``/``evidence`` (PR7), ``promote`` (PR8) — and
-until then print an honest "not yet implemented" message rather than pretending
-to vet anything.
+All subcommands are live: ``scan`` (decision-only verdict), ``manifest``,
+``policy test`` (PR2/PR5); ``ingest``/``verify``/``evidence`` (signed DSSE
+attestations, PR7); and ``promote`` (gated trusted-store promotion, PR8 — the one
+command that crosses the decision boundary, I6). Everything before ``promote`` is
+decision-only.
 """
 
 from __future__ import annotations
@@ -45,6 +45,13 @@ from mig.gates import default_gates
 from mig.policy.engine import matched_rules
 from mig.policy.loader import load_policy
 from mig.policy.schema import Policy, PolicyError
+from mig.promotion import (
+    PromotionError,
+    make_promotion_gate,
+    make_trusted_store,
+    promote_artifact,
+)
+from mig.promotion.audit import PromotionAuditSink
 from mig.sandbox.docker import DEFAULT_IMAGE, DockerSandbox
 from mig.sources.base import SourceError
 from mig.sources.huggingface import HuggingFaceSource
@@ -65,11 +72,11 @@ if TYPE_CHECKING:
     from mig.core.verdict import Verdict
     from mig.evidence.dsse import Envelope
     from mig.evidence.signing import Signer, Verifier
+    from mig.promotion.gate import PromotionGate
 
-#: Subcommand -> the PR that implements it. Used to print honest placeholders.
-_PENDING: dict[str, str] = {
-    "promote": "PR8",
-}
+#: Subcommand -> the PR that implements it. Empty: every subcommand is now live
+#: (PR8 implemented `promote`, the last one). Kept as the seam for future commands.
+_PENDING: dict[str, str] = {}
 
 #: Signer backends selectable on the CLI (hmac is the zero-dep default).
 _SIGNER_CHOICES = ["hmac", "ed25519", "cosign"]
@@ -144,9 +151,41 @@ def build_parser() -> argparse.ArgumentParser:
     evidence.add_argument("--out", help="write the bundle here (default: stdout)")
     evidence.add_argument("--compact", action="store_true")
 
-    promote = sub.add_parser("promote", help="promote to the trusted store (PR8)")
-    promote.add_argument("ref", nargs="?")
-    promote.add_argument("--attestation")
+    promote = sub.add_parser(
+        "promote", help="gated promotion of a verified attestation to the trusted store"
+    )
+    _add_ref_args(promote)
+    promote.add_argument(
+        "--attestation", required=True, help="signed DSSE envelope or evidence bundle"
+    )
+    _add_signer_args(promote)
+    promote.add_argument(
+        "--expected-keyid", help="fail unless the envelope keyid matches"
+    )
+    promote.add_argument(
+        "--require-keyid",
+        action="append",
+        metavar="KID",
+        help="only promote attestations signed by an allowlisted keyid (repeatable)",
+    )
+    promote.add_argument(
+        "--require-asymmetric",
+        action="store_true",
+        help="refuse HMAC (integrity-only) attestations — require ed25519/cosign",
+    )
+    promote.add_argument("--store", choices=["local"], default="local")
+    promote.add_argument(
+        "--store-root", help="trusted store root (or $MIG_TRUSTED_STORE; ./.mig-trusted)"
+    )
+    promote.add_argument(
+        "--opa", choices=["cli"], help="add an OPA gate (deny-overrides)"
+    )
+    promote.add_argument("--opa-bin", default="opa", help="opa binary for --opa cli")
+    promote.add_argument("--opa-policy", help="Rego policy file for --opa cli")
+    promote.add_argument(
+        "--dry-run", action="store_true", help="verify + decide but do not write"
+    )
+    promote.add_argument("--compact", action="store_true")
 
     return parser
 
@@ -582,6 +621,81 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0 if result.ok else 3  # 3 = verification failure (tamper), distinct from 2
 
 
+def _store_root(args: argparse.Namespace) -> str:
+    return args.store_root or os.environ.get("MIG_TRUSTED_STORE") or ".mig-trusted"
+
+
+def _build_promotion_gate(args: argparse.Namespace) -> PromotionGate:
+    keyids = frozenset(args.require_keyid or [])
+    return make_promotion_gate(
+        opa=args.opa,
+        opa_bin=args.opa_bin,
+        policy_path=args.opa_policy,
+        required_keyids=keyids,
+        require_asymmetric=args.require_asymmetric,
+    )
+
+
+def _cmd_promote(args: argparse.Namespace) -> int:
+    if args.opa == "cli" and not args.opa_policy:
+        print("mig promote: --opa cli requires --opa-policy FILE", file=sys.stderr)
+        return 2
+    try:
+        ref, type_hint = _resolve_ref(args.ref, args.type, args.digest)
+        verifier = _build_verifier(args)
+        gate = _build_promotion_gate(args)
+        store = make_trusted_store(args.store, root=_store_root(args))
+    except (ValueError, SigningError, PromotionError) as exc:
+        print(f"mig promote: {exc}", file=sys.stderr)
+        return 2
+
+    if args.opa == "cli":  # an explicitly-requested but absent opa is operator error
+        from mig.promotion.opa.cli import opa_available
+
+        if not opa_available(args.opa_bin):
+            print(
+                f"mig promote: opa binary {args.opa_bin!r} not found or unusable",
+                file=sys.stderr,
+            )
+            return 2
+
+    audit = PromotionAuditSink(_store_root(args))
+    result = promote_artifact(
+        ref,
+        attestation_path=args.attestation,
+        verifier=verifier,
+        store=store,
+        gate=gate,
+        source=_source_for(ref, type_hint),
+        audit=audit,
+        mig_version=__version__,
+        expected_keyid=args.expected_keyid,
+        dry_run=args.dry_run,
+    )
+
+    report: dict[str, object] = {
+        "ok": result.ok,
+        "outcome": result.outcome,
+        "promoted": result.outcome in ("promoted", "idempotent_noop"),
+        "already_present": result.already_present,
+        "digest": result.digest,
+        "store_uri": result.store_uri,
+        "decision": result.decision,
+        "scheme": result.scheme,
+        "keyid": result.keyid,
+        "gate": result.gate,
+        "verification": result.verification,
+        "problems": result.problems,
+    }
+    if result.ok and result.scheme == HMAC_SCHEME:
+        report["warning"] = (
+            "promoted an HMAC (integrity-only) attestation — across a trust "
+            "boundary use ed25519/cosign and --require-asymmetric"
+        )
+    print(json.dumps(report, indent=None if args.compact else 2))
+    return result.exit_code
+
+
 _COMMANDS = {
     "scan": _cmd_scan,
     "manifest": _cmd_manifest,
@@ -589,6 +703,7 @@ _COMMANDS = {
     "ingest": _cmd_ingest,
     "evidence": _cmd_evidence,
     "verify": _cmd_verify,
+    "promote": _cmd_promote,
 }
 
 
