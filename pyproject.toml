@@ -32,7 +32,8 @@ classifiers = [
 ]
 # The core is intentionally stdlib-only (invariant I10: minimal, audited deps).
 # Integrations arrive as extras in their respective PRs — mig[huggingface] (PR3),
-# mig[scanners] (PR4), mig[docker] (PR6), mig[opa] / mig[s3] / mig[harbor] (PR8+).
+# mig[scanners] (PR4), mig[opa] / mig[s3] / mig[harbor] (PR8+). The PR6 behavioral
+# sandbox needs no Python dep — it drives the host `docker` CLI via subprocess.
 dependencies = []
 dynamic = ["version"]
 
@@ -116,9 +117,17 @@ select = [
 # the fast first line; tests/test_invariants.py is the hard, structural gate.
 
 [tool.ruff.lint.per-file-ignores]
-# Tests legitimately use asserts (S101), hardcoded /tmp fixture paths (S108), and
-# build a malicious pickle fixture on purpose (S301/S403) as the detection oracle.
-"tests/*" = ["B011", "S101", "S108", "S301", "S403"]
+# Tests legitimately use asserts (S101), hardcoded /tmp fixture paths (S108),
+# build a malicious pickle fixture on purpose (S301/S403), and drive Docker /
+# the harness via subprocess (S404/S603/S607).
+"tests/*" = ["B011", "S101", "S108", "S301", "S403", "S404", "S603", "S607"]
+# The DockerSandbox driver intentionally shells out to `docker` (S404/S603/S607);
+# argv is MIG-controlled and never shell-interpreted. The "/tmp" strings are
+# in-container tmpfs mounts, not host temp files (S108).
+"src/mig/sandbox/docker.py" = ["S404", "S603", "S607", "S108"]
+# The in-CONTAINER detonation harness intentionally deserializes (S403/S301) —
+# it runs confined, never in the host process (see I1 exemption).
+"src/mig/sandbox/_harness.py" = ["S403", "S301"]
 
 [tool.mypy]
 python_version = "3.11"

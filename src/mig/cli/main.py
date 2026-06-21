@@ -27,6 +27,7 @@ from mig.gates import default_gates
 from mig.policy.engine import matched_rules
 from mig.policy.loader import load_policy
 from mig.policy.schema import Policy, PolicyError
+from mig.sandbox.docker import DEFAULT_IMAGE, DockerSandbox
 from mig.sources.base import SourceError
 from mig.sources.huggingface import HuggingFaceSource
 from mig.sources.local import LocalSource
@@ -42,7 +43,7 @@ _DECISION_RANK = {
 }
 
 if TYPE_CHECKING:
-    from mig.core.protocols import Source
+    from mig.core.protocols import Sandbox, Source
 
 #: Subcommand -> the PR that implements it. Used to print honest placeholders.
 _PENDING: dict[str, str] = {
@@ -70,6 +71,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--fail-on",
         choices=["review", "reject"],
         help="exit non-zero if the decision is at least this severe",
+    )
+    scan.add_argument(
+        "--sandbox",
+        choices=["noop", "docker"],
+        default="noop",
+        help="behavioral sandbox (default: noop = loud SKIPPED)",
+    )
+    scan.add_argument("--sandbox-image", help="container image for --sandbox docker")
+    scan.add_argument(
+        "--sandbox-runtime",
+        choices=["runc", "gvisor"],
+        default="runc",
+        help="container runtime for --sandbox docker",
     )
     scan.add_argument("--compact", action="store_true", help="emit single-line JSON")
 
@@ -156,6 +170,14 @@ def _load_policy(path: str | None) -> Policy:
     return load_policy(path)
 
 
+def _build_sandbox(args: argparse.Namespace) -> Sandbox | None:
+    """The behavioral sandbox for this run (None → NoopSandbox default, I7)."""
+    if getattr(args, "sandbox", "noop") != "docker":
+        return None
+    runtime = "runsc" if getattr(args, "sandbox_runtime", "runc") == "gvisor" else None
+    return DockerSandbox(image=args.sandbox_image or DEFAULT_IMAGE, runtime=runtime)
+
+
 def _exit_code(decision: Decision, fail_on: str | None) -> int:
     if not fail_on:
         return 0
@@ -180,7 +202,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         except _FETCH_ERRORS as exc:
             print(f"mig scan: {exc}", file=sys.stderr)
             return 2
-        ctx = make_context(policy=policy, quarantine=Quarantine(root=quarantine_root))
+        ctx = make_context(
+            policy=policy,
+            quarantine=Quarantine(root=quarantine_root),
+            sandbox=_build_sandbox(args),
+        )
         try:
             verdict = run_pipeline(artifact, default_gates(), ctx)
         except PolicyError as exc:  # an eval-time policy error is an operator error

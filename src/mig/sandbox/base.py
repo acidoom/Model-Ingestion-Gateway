@@ -41,6 +41,8 @@ def observation_to_result(
             "dns_queries": list(observation.dns_queries),
             "network_attempts": list(observation.network_attempts),
             "exit_code": observation.exit_code,
-            **dict(observation.raw),
+            # The raw harness blob is artifact-influenced — namespace it so it can
+            # never overwrite the sanitized keys above (attestation integrity).
+            "raw": dict(observation.raw),
         },
     )
