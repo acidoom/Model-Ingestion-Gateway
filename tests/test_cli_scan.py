@@ -13,6 +13,8 @@ import pytest
 
 from conftest import (
     install_fake_hf_hub,
+    make_malicious_code_dir,
+    make_malicious_pickle_dir,
     make_model_dir,
     make_pickle_model_dir,
     make_trust_remote_code_dir,
@@ -52,6 +54,28 @@ def test_scan_pickle_model_rejects(
 ) -> None:
     _code, out, _ = _run(["scan", str(make_pickle_model_dir(tmp_path))], capsys)
     assert json.loads(out)["decision"] == "reject"
+
+
+def test_scan_malicious_pickle_corpus_rejects(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # End to end: picklescan flags the os.system opcode → REJECT.
+    _code, out, _ = _run(["scan", str(make_malicious_pickle_dir(tmp_path))], capsys)
+    verdict: dict[str, Any] = json.loads(out)
+    assert verdict["decision"] == "reject"
+    codes = {f["code"] for g in verdict["gate_results"] for f in g["findings"]}
+    assert "unsafe_pickle_global" in codes
+
+
+def test_scan_malicious_code_corpus_rejects(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # End to end: the AST static-code gate flags os.system in modeling_*.py.
+    _code, out, _ = _run(["scan", str(make_malicious_code_dir(tmp_path))], capsys)
+    verdict: dict[str, Any] = json.loads(out)
+    assert verdict["decision"] == "reject"
+    codes = {f["code"] for g in verdict["gate_results"] for f in g["findings"]}
+    assert "shell_execution" in codes
 
 
 def test_scan_executable_type_never_approves(
