@@ -9,7 +9,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-authors = [{ name = "MIG authors" }]
+authors = [{ name = "carc.ai" }]
+maintainers = [{ name = "carc.ai" }]
 keywords = [
     "security",
     "supply-chain",
@@ -59,8 +60,8 @@ s3 = ["boto3>=1.34,<2"]
 harbor = ["oras>=0.2,<1"]
 
 [project.urls]
-Homepage = "https://github.com/acidoom/mig"
-Repository = "https://github.com/acidoom/mig"
+Homepage = "https://carc.ai"
+Repository = "https://github.com/acidoom/Model-Ingestion-Gateway"
 
 [project.scripts]
 mig = "mig.cli.main:main"
