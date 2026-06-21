@@ -15,7 +15,7 @@ Kubernetes admission controller, or an embedded guard inside an agent/MLOps
 platform, without coupling to any one deployment.
 
 The **core is stdlib-only** (zero runtime dependencies); every integration is an
-opt-in extra. Built by [carc.ai](https://carc.ai). Apache-2.0.
+opt-in extra. Built by [carc.ai](https://x.com/carc_ai). Apache-2.0.
 
 <p align="center">
   <img src="docs/overview.png" alt="MIG overview: untrusted sources → quarantined gateway (seven gates) → signed promotion → trusted platform" width="640">
@@ -386,9 +386,9 @@ system stays decision-only until PR8 introduces gated promotion. **All landed:**
 
 ## License
 
-Copyright © 2026 [carc.ai](https://carc.ai). Licensed under the
+Copyright © 2026 [carc.ai](https://x.com/carc_ai). Licensed under the
 [Apache License 2.0](LICENSE).
 
 ---
 
-Built and maintained by [carc.ai](https://carc.ai).
+Built and maintained by [carc.ai](https://x.com/carc_ai).
