@@ -13,10 +13,27 @@ Kubernetes admission controller, or an embedded guard inside an agent/MLOps
 platform — without coupling to any one deployment.
 
 > **Status: pre-alpha.** This repository is being built one PR at a time
-> against the implementation spec. **PR1 (this PR)** lays the keystone: the
-> domain contracts and seams from spec §5, packaging, and CI. The system is
-> **decision-only** — it never writes to a trusted store — until promotion is
-> introduced deliberately late and gated (PR8).
+> against the implementation spec. PR1 laid the keystone (domain contracts +
+> seams from spec §5, packaging, CI); **PR2** adds the pipeline runner, a
+> `local` source, the format-allowlist + digest + behavioral gates, and a
+> working `mig scan`. The system is **decision-only** — it never writes to a
+> trusted store — until promotion is introduced deliberately late and gated (PR8).
+
+## Quickstart
+
+```console
+$ mig scan ./path/to/model        # decision-only verdict as JSON
+```
+
+A clean safetensors model returns `"decision": "approve"` with a visible
+`behavioral` gate result of `"status": "skipped"` (the default `NoopSandbox`
+runs no dynamic analysis — I7). Scan the same artifact as an executable type and
+it can never auto-approve at static-only rigor:
+
+```console
+$ mig scan ./path/to/server --type mcp_server   # → "decision": "review_required"  (I8)
+$ mig manifest ./path/to/model                  # files + content digest
+```
 
 ## Design invariants (non-negotiable)
 
@@ -59,10 +76,10 @@ fetch (digest-pinned → quarantine)
 ## CLI (surface; subcommands land per-PR)
 
 ```
-mig scan <ref>                 # decision-only verdict (JSON)        — PR2
+mig scan <ref>                 # decision-only verdict (JSON)        ✓ PR2
+mig manifest <ref>             # files + content digest             ✓ PR2
 mig ingest <ref> --policy p.yaml                                     — PR5
 mig verify <ref>               # verify a prior attestation          — PR7
-mig manifest <ref>                                                   — PR2
 mig policy test <ref> --policy p.yaml                                — PR5
 mig evidence <ref> --out evidence.zip                                — PR7
 mig promote <ref> --attestation a.json   # separate, gated          — PR8
@@ -85,9 +102,9 @@ uv run ruff format .    # format
 Implemented in PR order; each PR leaves the system green and exercisable.
 The system stays decision-only until PR8.
 
-- **PR1** — Core contracts & scaffolding *(this PR)*
-- **PR2** — Pipeline runner + walking skeleton (`mig scan` end-to-end)
-- **PR3** — Quarantine + digest-pinned fetch + Hugging Face source
+- **PR1** — Core contracts & scaffolding ✓
+- **PR2** — Pipeline runner + walking skeleton (`mig scan` end-to-end) ✓
+- **PR3** — Quarantine + digest-pinned fetch + Hugging Face source *(next)*
 - **PR4** — Static scanner suite (wrap picklescan/modelscan, secrets, AST)
 - **PR5** — Declarative policy engine
 - **PR6** — Behavioral sandbox (Docker → gVisor/Firecracker)

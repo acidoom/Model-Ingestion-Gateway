@@ -7,6 +7,9 @@ via mypy and structurally via ``isinstance``).
 
 from __future__ import annotations
 
+import json
+import pathlib
+import struct
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -72,6 +75,67 @@ def make_artifact(
         metadata=dict(metadata or {}),
         digest="sha256:00",
     )
+
+
+# --------------------------------------------------------------------------- #
+# Artifact fixture builders (real files on disk, for source/gate/CLI tests)
+# --------------------------------------------------------------------------- #
+
+
+def write_safetensors(
+    path: pathlib.Path,
+    *,
+    tensor_bytes: bytes = b"\x00\x00\x00\x00",
+    metadata: dict[str, str] | None = None,
+) -> None:
+    """Write a minimal, well-formed safetensors file (one F32 tensor)."""
+    header: dict[str, object] = {
+        "weight": {"dtype": "F32", "shape": [1], "data_offsets": [0, len(tensor_bytes)]}
+    }
+    if metadata is not None:
+        header["__metadata__"] = metadata
+    raw = json.dumps(header).encode("utf-8")
+    with open(path, "wb") as handle:
+        handle.write(struct.pack("<Q", len(raw)))
+        handle.write(raw)
+        handle.write(tensor_bytes)
+
+
+def make_model_dir(
+    base: pathlib.Path,
+    *,
+    name: str = "model",
+    config: dict[str, object] | None = None,
+) -> pathlib.Path:
+    """A safe safetensors model directory (model.safetensors + config.json)."""
+    directory = base / name
+    directory.mkdir(parents=True, exist_ok=True)
+    write_safetensors(directory / "model.safetensors")
+    (directory / "config.json").write_text(
+        json.dumps(config if config is not None else {"model_type": "demo"})
+    )
+    return directory
+
+
+def make_pickle_model_dir(base: pathlib.Path) -> pathlib.Path:
+    """A model directory carrying an unsafe pickle-based weight file."""
+    directory = base / "pickle-model"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "pytorch_model.bin").write_bytes(b"\x80\x04unsafe-pickle")
+    (directory / "config.json").write_text(json.dumps({"model_type": "demo"}))
+    return directory
+
+
+def make_trust_remote_code_dir(base: pathlib.Path) -> pathlib.Path:
+    """A safetensors model that ships custom code + trust_remote_code."""
+    directory = base / "remote-code-model"
+    directory.mkdir(parents=True, exist_ok=True)
+    write_safetensors(directory / "model.safetensors")
+    (directory / "config.json").write_text(
+        json.dumps({"model_type": "demo", "trust_remote_code": True})
+    )
+    (directory / "modeling_demo.py").write_text("# custom modeling code\n")
+    return directory
 
 
 @pytest.fixture
