@@ -197,22 +197,25 @@ def test_ingest_orchestration_has_no_trusted_store_write() -> None:
 
 
 def test_no_core_module_exercises_trusted_store_write() -> None:
-    """I6: no module under core imports a concrete trusted store or *calls*
-    ``promote()``. Re-exporting the TrustedStore *protocol type* is allowed —
-    defining the seam is fine; exercising write access during ingest is not.
+    """I6: no module under core OR evidence imports a concrete trusted store or
+    *calls* ``promote()``. Re-exporting the TrustedStore *protocol type* is allowed
+    — defining the seam is fine; exercising write access during ingest/attest is
+    not. The evidence (attestation/signing) layer is on the ingest path too, so it
+    is held to the same rule.
     """
-    for path in (SRC / "core").rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                assert "trusted_store" not in node.module, (
-                    f"{path.name} imports a trusted store on the ingest path (I6)"
-                )
-            if isinstance(node, ast.Call):
-                dotted = _dotted_call_name(node.func)
-                assert not (dotted and dotted.split(".")[-1] == "promote"), (
-                    f"{path.name} calls promote() on the ingest path (I6)"
-                )
+    for subdir in ("core", "evidence"):
+        for path in (SRC / subdir).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    assert "trusted_store" not in node.module, (
+                        f"{path.name} imports a trusted store on the ingest path (I6)"
+                    )
+                if isinstance(node, ast.Call):
+                    dotted = _dotted_call_name(node.func)
+                    assert not (dotted and dotted.split(".")[-1] == "promote"), (
+                        f"{path.name} calls promote() on the ingest path (I6)"
+                    )
 
 
 # --- I8: executable types need behavioral rigor ----------------------------- #
@@ -241,6 +244,43 @@ def test_core_runtime_dependencies_are_empty() -> None:
     """I10: the core has zero (pinned, audited) runtime dependencies."""
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert data["project"]["dependencies"] == []
+
+
+def test_signing_default_is_stdlib_only() -> None:
+    """I10: the default signing path is stdlib-only. No module under evidence/
+    imports ``cryptography`` at top level EXCEPT the opt-in ed25519 backend, which
+    imports it lazily inside functions — so importing the evidence package (and
+    signing with the HMAC default) never pulls in the extra.
+    """
+    ed25519_backend = SRC / "evidence" / "signers" / "ed25519.py"
+    offenders: list[str] = []
+    for path in (SRC / "evidence").rglob("*.py"):
+        if path == ed25519_backend:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Import)
+                and any(a.name.split(".")[0] == "cryptography" for a in node.names)
+                or (
+                    isinstance(node, ast.ImportFrom)
+                    and (node.module or "").split(".")[0] == "cryptography"
+                )
+            ):
+                offenders.append(path.name)
+    assert offenders == [], f"I10: evidence imports cryptography eagerly: {offenders}"
+
+
+def test_ed25519_backend_imports_cryptography_lazily() -> None:
+    """The ed25519 backend must keep ``cryptography`` out of module scope (lazy,
+    inside functions) so even importing it does not require the extra (I10)."""
+    ed25519_backend = SRC / "evidence" / "signers" / "ed25519.py"
+    tree = ast.parse(ed25519_backend.read_text(encoding="utf-8"))
+    for node in tree.body:  # module-level statements only
+        assert not (
+            isinstance(node, (ast.Import, ast.ImportFrom))
+            and "cryptography" in ast.dump(node)
+        ), "ed25519 backend imports cryptography at module scope (must be lazy)"
 
 
 def test_locked_dependencies_are_hash_pinned() -> None:

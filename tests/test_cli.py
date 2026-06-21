@@ -23,10 +23,7 @@ def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
 @pytest.mark.parametrize(
     ("command", "pr"),
     [
-        ("ingest", "PR7"),
-        ("verify", "PR7"),
-        ("evidence", "PR7"),
-        ("promote", "PR8"),
+        ("promote", "PR8"),  # ingest/verify/evidence implemented in PR7
     ],
 )
 def test_pending_subcommands_are_honest(
