@@ -12,5 +12,11 @@ from mig.sources.base import (
     SourceError,
     UnpinnedReferenceError,
 )
+from mig.sources.local import LocalSource
 
-__all__ = ["SourceError", "DigestMismatchError", "UnpinnedReferenceError"]
+__all__ = [
+    "SourceError",
+    "DigestMismatchError",
+    "UnpinnedReferenceError",
+    "LocalSource",
+]

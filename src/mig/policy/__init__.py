@@ -6,6 +6,7 @@ is the deferred enforcement seam over the signed attestation (ADR-003).
 
 from __future__ import annotations
 
+from mig.policy.engine import default_decision, evaluate
 from mig.policy.schema import Policy
 
-__all__ = ["Policy"]
+__all__ = ["Policy", "default_decision", "evaluate"]

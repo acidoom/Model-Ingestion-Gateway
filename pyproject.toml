@@ -106,5 +106,8 @@ pretty = true
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
+# Import mig straight from src so the test run does not depend on the editable
+# install (which iCloud Drive can evict from under .venv). CI is unaffected.
+pythonpath = ["src"]
 addopts = "-ra --strict-markers --strict-config"
 filterwarnings = ["error"]
