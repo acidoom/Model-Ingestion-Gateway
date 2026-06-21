@@ -1,55 +1,227 @@
 # MIG — Model Ingestion Gateway
 
-> Vet AI artifacts **before** they enter trusted infrastructure.
+> Vet AI models, packages, and artifacts **before** they enter trusted infrastructure.
 
 MIG is a pure-Python, embeddable library that treats public sources (Hugging
-Face, GitHub, PyPI, npm, object stores, internal registries) as **untrusted**
-and runs them through a composable gate pipeline that produces a **categorical,
-type-aware verdict** and a **signed attestation** — the traceability artifact
-for compliance (EU AI Act / NIS2 / GxP / UKSC).
+Face, GitHub, PyPI, npm, OCI registries) as **untrusted** and runs every artifact
+through a composable, **fail-closed** gate pipeline that lands it in quarantine,
+inspects it, and produces a **categorical, type-aware verdict** plus a **signed
+attestation** — the traceability artifact for compliance (EU AI Act / NIS2 / GxP).
+Nothing reaches trusted infrastructure until it has passed every gate and been
+**signed and promoted** through a separate, gated step.
 
 It ships as a library so the same vetting logic runs as a CLI, a CI gate, a
 Kubernetes admission controller, or an embedded guard inside an agent/MLOps
 platform — without coupling to any one deployment.
 
-> **Status: pre-alpha.** This repository is being built one PR at a time
-> against the implementation spec. PR1 laid the keystone (domain contracts +
-> seams from spec §5, packaging, CI); **PR2** adds the pipeline runner, a
-> `local` source, the format-allowlist + digest + behavioral gates, and a
-> working `mig scan`. The system is **decision-only** — it never writes to a
-> trusted store — until promotion is introduced deliberately late and gated (PR8).
+The **core is stdlib-only** (zero runtime dependencies); every integration is an
+opt-in extra. Apache-2.0.
 
-## Quickstart
+## Reference architecture
 
-```console
-$ mig scan ./path/to/model        # decision-only verdict as JSON
+Public registries are Zone 1 (untrusted, pull-only). The gateway (Zone 2) is a
+quarantined DMZ running a sequential, fail-closed inspection pipeline; only a
+clean pass is signed and promoted into the trusted platform (Zone 3).
+
+```mermaid
+flowchart LR
+    subgraph Z1["ZONE 1 — Untrusted sources (pull-only)"]
+        direction TB
+        HF[Hugging Face Hub] ~~~ PY[PyPI] ~~~ NP[npm] ~~~ GH[GitHub] ~~~ OCI[OCI registries]
+    end
+
+    subgraph Z2["ZONE 2 — Model Ingestion Gateway (DMZ / quarantine)"]
+        direction TB
+        Q["Land in quarantine<br/>digest-pinned · object-locked · no execution"]
+        G1["G1 · Provenance &amp; reputation<br/>(integration point)"]
+        G2["G2 · Format allowlist<br/>safetensors / GGUF · pickle banned"]
+        G3["G3 · Static analysis<br/>picklescan · AST · secrets · license · injection"]
+        G4["G4 · Signature &amp; attestation<br/>DSSE in-toto · re-bind digest"]
+        G5["G5 · Behavioural sandbox<br/>Docker / gVisor · no egress"]
+        G6["G6 · Policy gate<br/>embedded floor + OPA (deny-overrides)"]
+        G7["G7 · Human review<br/>(integration point)"]
+        SIGN["Sign &amp; promote<br/>cosign / HSM · attach attestation"]
+        Q --> G1 --> G2 --> G3 --> G4 --> G5 --> G6 --> G7 --> SIGN
+    end
+
+    subgraph Z3["ZONE 3 — Trusted platform"]
+        direction TB
+        HB["Harbor registry<br/>signed artifacts only · digest-verified on pull"]
+        IN[Inference clusters] ~~~ TR[Training &amp; eval] ~~~ VX[Vector indexers]
+    end
+
+    subgraph X["Cross-cutting"]
+        direction LR
+        SIEM[SIEM · audit &amp; IoCs] ~~~ OPA[OPA policy repo] ~~~ KC[Keycloak · identity]
+    end
+
+    Z1 -- "pull only" --> Q
+    SIGN -- "promote · signed" --> HB
+    G3 -. "reject + IoC" .-> SIEM
 ```
 
-A clean safetensors model returns `"decision": "approve"` with a visible
-`behavioral` gate result of `"status": "skipped"` (the default `NoopSandbox`
-runs no dynamic analysis — I7). Scan the same artifact as an executable type and
-it can never auto-approve at static-only rigor:
+> The diagram is the **reference deployment architecture**. This repository is the
+> **gateway core** — it implements the quarantine, gates **G2–G6**, the signed
+> attestation, and the gated promotion. **G1** (provenance/reputation) and **G7**
+> (human review) are integration points the categorical verdict routes to
+> (`review_required`); Harbor / Keycloak / SIEM are reference deployment
+> components MIG produces signed evidence for, not parts of the library.
+
+| Reference gate | MIG implementation | Module / command |
+|---|---|---|
+| G2 · Format allowlist | safetensors/GGUF allow, pickle weights rejected | `gates/format_allowlist` |
+| G3 · Static analysis | picklescan + AST static-code + secrets + license + prompt-injection | `gates/*` |
+| G4 · Signature & attestation | in-toto Statement v1 + DSSE (HMAC / ed25519 / cosign) | `mig ingest` / `verify` |
+| G5 · Behavioural sandbox | confined Docker / gVisor detonation, egress-blocked | `sandbox/docker` |
+| G6 · Policy gate | declarative safety-floor engine; OPA at promotion | `policy/` · `promotion/` |
+| Sign & promote | gated, content-addressed write into the trusted store | `mig promote` |
+
+## Worked example
+
+A clean safetensors model, end to end. (The banner is stderr-only and
+TTY-gated; pipe stdout and you get clean JSON. Set `MIG_NO_BANNER=1` to silence it.)
+
+### 1 · Scan — decision-only verdict
 
 ```console
-$ mig scan ./path/to/server --type mcp_server   # → "decision": "review_required"  (I8)
-$ mig manifest ./path/to/model                  # files + content digest
+$ mig scan ./sentiment-model
+```
+```jsonc
+{
+  "artifact_type": "model",
+  "gate_results": [
+    { "gate_id": "format_allowlist", "status": "pass", "rigor": "static",
+      "scanner_name": "mig.format_allowlist", "scanner_version": "0.1.0.dev0",
+      "evidence": { "allowed_weight_files": ["model.safetensors"], "unsafe_weight_files": [] } },
+    { "gate_id": "digest", "status": "pass",
+      "evidence": { "digest": "sha256:96fc78750744eb81520be011be3f84265bc345f384481102b69551647a53205e" } },
+    { "gate_id": "serialization_safety", "status": "pass", "scanner_name": "picklescan", "scanner_version": "1.0.4" },
+    /* secrets · license_metadata · static_code · prompt_injection → all pass */
+    { "gate_id": "behavioral", "status": "skipped", "rigor": "none",
+      "findings": [ { "severity": 3, "code": "behavioral_analysis_skipped",
+        "message": "Behavioral analysis was SKIPPED: the configured sandbox is NoopSandbox ... Do not treat any APPROVE as behaviorally vetted (I7/I8)." } ],
+      "scanner_name": "sandbox:noop" }
+  ],
+  "decision": "approve"
+}
 ```
 
-Ingest produces a **signed attestation** (a DSSE-wrapped in-toto Statement) that
-binds the decision to the artifact's content digest; `verify` re-checks the
-signature, re-binds the digest, and re-asserts attribution — failing closed
-(exit `3`) on any tamper:
+The default `NoopSandbox` emits a **loud `SKIPPED`** (I7) — an APPROVE is never
+silently "behaviorally vetted". Scan the *same* artifact as an executable type and
+it can never auto-approve at static-only rigor (I8):
+
+```console
+$ mig scan ./sentiment-model --type mcp_server --compact
+{... "decision": "review_required"}
+```
+
+A **malicious** artifact (a pickle weight that runs `os.system` on load) is
+rejected — `--fail-on reject` makes the exit code non-zero for CI:
+
+```console
+$ mig scan ./evil-model --fail-on reject
+```
+```json
+{
+  "decision": "reject",
+  "findings": [
+    { "gate": "format_allowlist",      "code": "unsafe_serialization_format", "sev": 4 },
+    { "gate": "serialization_safety",  "code": "unsafe_pickle_global",        "sev": 4 }
+  ]
+}
+```
+
+### 2 · Ingest — produce a signed attestation
 
 ```console
 $ export MIG_SIGNING_KEY=$(openssl rand -hex 32)
-$ mig ingest ./path/to/model --out model.dsse.json     # decision-only: signs, never promotes (I6)
-$ mig verify ./path/to/model --attestation model.dsse.json   # exit 0 verified / 3 tampered
-$ mig evidence ./path/to/model --out evidence.json     # full bundle (verdict + signed envelope)
+$ mig ingest ./sentiment-model --out model.dsse.json
 ```
 
-## Design invariants (non-negotiable)
+The output is a [DSSE](https://github.com/secure-systems-lab/dsse) envelope whose
+payload is an [in-toto Statement v1](https://github.com/in-toto/attestation); the
+signature is over the canonical-JSON PAE, and the artifact digest is the
+**Statement subject** (inside the signed bytes):
 
-These are encoded as tests, not just documented:
+```jsonc
+// model.dsse.json
+{ "payloadType": "application/vnd.in-toto+json",
+  "payload": "eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEi...",
+  "signatures": [ { "keyid": "3b7498245244a4db", "scheme": "hmac-sha256", "sig": "wHRyKIWruSUiYCs8..." } ] }
+
+// base64-decoded payload (the signed in-toto Statement):
+{ "_type": "https://in-toto.io/Statement/v1",
+  "predicateType": "https://mig.dev/attestation/vetting/v1",
+  "subject": [ { "name": "local:///sentiment-model",
+                 "digest": { "sha256": "96fc78750744eb81520be011be3f84265bc345f384481102b69551647a53205e" } } ],
+  "predicate": { "decision": "approve", "overall_rigor": "static", "confinement_level": "noop",
+                 "gate_summary": [ /* every gate: status + rigor + scanner_name + scanner_version (I5) */ ] } }
+```
+
+### 3 · Verify — re-check signature, re-bind digest, fail closed
+
+```console
+$ mig verify ./sentiment-model --attestation model.dsse.json --compact
+{"ok": true, "scheme": "hmac-sha256", "keyid": "3b7498245244a4db", "decision": "approve",
+ "checks": {"signature": true, "digest_rebind": true, "attribution": true, "keyid": true},
+ "warning": "integrity-only (shared-secret HMAC), NOT third-party provenance — use ed25519/cosign across a trust boundary"}
+# exit 0
+```
+
+Tamper with one byte of the artifact and verify **fails closed** — the live
+re-hash no longer matches the attested subject (I3), and the exit code is `3`
+(verification failure, distinct from an operator error):
+
+```console
+$ echo '{"model_type":"BACKDOORED"}' > ./sentiment-model/config.json
+$ mig verify ./sentiment-model --attestation model.dsse.json --compact
+{"ok": false, ... "checks": {"signature": true, "digest_rebind": false, "attribution": true, "keyid": true},
+ "problems": ["digest mismatch: live sha256:cdb324... != attested sha256:96fc78..."]}
+# exit 3
+```
+
+### 4 · Promote — the gated write into the trusted store
+
+`mig promote` re-verifies the signed attestation, runs the **embedded safety
+floor AND** (optionally) OPA under **deny-overrides**, then writes atomically into
+a content-addressed store and audits the attempt:
+
+```console
+$ mig promote ./sentiment-model --attestation model.dsse.json --store-root ./trusted --compact
+2026-06-21 ... INFO mig.promotion promotion promoted: digest=sha256:96fc78...
+{"ok": true, "outcome": "promoted", "store_uri": "mig-trusted://sha256/96fc78...",
+ "decision": "approve", "gate": {"allow": true, "engine": "embedded", "reasons": []},
+ "verification": {"ok": true, "checks": {"signature": true, "digest_rebind": true, "attribution": true, "keyid": true}}}
+# exit 0
+```
+```console
+$ find ./trusted -type f
+./trusted/cas/sha256/96/96fc78…/.complete            # commit marker, written last
+./trusted/cas/sha256/96/96fc78…/artifact/config.json
+./trusted/cas/sha256/96/96fc78…/artifact/model.safetensors
+./trusted/cas/sha256/96/96fc78…/attestation.dsse.json   # the signed envelope
+./trusted/cas/sha256/96/96fc78…/receipt.json
+./trusted/index/promotions.jsonl                     # append-only audit trail
+```
+
+Promoting a tampered artifact fails verification (exit 3); promoting a `reject` /
+`review_required` attestation is denied by the floor (exit 1). The same digest
+re-promotes idempotently. Exit codes: `0` promoted/idempotent · `1` policy denied
+· `2` operator error · `3` verification failure.
+
+## CLI
+
+```
+mig scan <ref>            decision-only verdict (JSON)                       --policy --fail-on --sandbox
+mig manifest <ref>        files + content digest
+mig policy test <ref>     evaluate a policy against an artifact              --policy
+mig ingest <ref>          fetch + scan + sign a DSSE attestation            --signer --key --out --bundle
+mig verify <ref>          re-check signature + re-bind digest + attribution --attestation --signer --key
+mig evidence <ref>        emit a full signed evidence bundle                --out
+mig promote <ref>         gated write into the trusted store                --attestation --store-root --opa
+```
+
+## Design invariants (non-negotiable — encoded as tests)
 
 | # | Invariant |
 |---|---|
@@ -58,87 +230,26 @@ These are encoded as tests, not just documented:
 | I3 | Sources pin + verify the digest/SHA at fetch and land bytes in **quarantine**. |
 | I4 | The verdict is **categorical and type-aware** — never a bare bool or score threshold. |
 | I5 | Every attestation encodes per-gate status + rigor + scanner version, plus overall confinement. |
-| I6 | `ingest()` stops at the decision; `promote()` is a separate, gated call. |
+| I6 | `ingest()` stops at the decision; `promote()` is a separate, gated call (and the only trusted-store writer). |
 | I7 | The default `NoopSandbox` emits a **loud** `SKIPPED` behavioral result. |
 | I8 | Executable artifact types can't be `APPROVE`d at static-only rigor. |
 | I9 | Prompt-injection inspection is a **WARN** signal, never a hard reject. |
 | I10 | MIG's own dependencies are pinned, hash-checked, minimal, and audited. |
 
-The core has **zero runtime dependencies** (I10) — it is stdlib-only. Integrations
-arrive as opt-in extras (`mig[huggingface]`, `mig[scanners]`, `mig[policy]`,
-`mig[signing]`) in their respective PRs. The Docker sandbox, the cosign signer,
-and the OPA promotion gate drive host CLIs (`docker`, `cosign`, `opa`) and need no
-Python dependency.
+## Signing & promotion backends
 
-## The pipeline
+The core path is stdlib-only and works offline/airgapped. Stronger backends are
+opt-in and drive host CLIs (no Python dependency):
 
-```
-fetch (digest-pinned → quarantine)
-  → format allowlist            [cheap]
-  → digest / manifest           [cheap]
-  → serialization safety        [cheap]    (wraps picklescan / modelscan)
-  → secrets / license / metadata[cheap]
-  → static code (AST)           [medium]   (trust_remote_code, custom modeling_*.py)
-  → prompt-injection            [medium, WARN-only]
-  → behavioral (sandbox)        [expensive](NoopSandbox by default → loud SKIPPED)
-  → policy evaluation           → Verdict  (categorical, type-aware)
-  → evidence bundle + signed attestation
-  --- decision boundary ---
-  → promote() to trusted store  [separate, gated: re-verify → policy → write → audit]
-```
-
-## CLI
-
-```
-mig scan <ref>                 # decision-only verdict (JSON)        ✓ PR2
-mig manifest <ref>             # files + content digest             ✓ PR2
-mig policy test <ref> --policy p.yaml                                ✓ PR5
-mig ingest <ref> --signer hmac --key k   # sign a DSSE attestation  ✓ PR7
-mig verify <ref> --attestation a.dsse.json   # re-check + re-bind   ✓ PR7
-mig evidence <ref> --out evidence.json   # full signed bundle       ✓ PR7
-mig promote <ref> --attestation a.dsse.json --key k   # gated write ✓ PR8
-```
-
-## Promotion — crossing the decision boundary (PR8)
-
-`mig promote` is the *only* command that writes into trusted infrastructure, and
-it is gated so an unverified, tampered, or non-`APPROVE` artifact can never get
-there. The ordered, fail-closed flow:
-
-1. **load** the signed attestation (never the unsigned bundle mirror);
-2. **fetch + re-hash** the artifact into a fresh quarantine;
-3. **re-verify** signature + digest re-bind (I3) + attribution (I5) — abort (exit 3) on tamper;
-4. **gate** the *verified* attestation through the **embedded safety floor** (`decision==approve`, all checks pass, executable types need behavioral rigor under docker/gvisor, a named policy) **AND** an optional OPA policy — **deny-overrides**: OPA can only further restrict, never loosen the floor (abort exit 1 on deny);
-5. **write** atomically into a content-addressed local trusted store (`mig-trusted://sha256/…`, idempotent, no-clobber) and **audit** every attempt — denials included.
-
-```console
-$ mig promote ./model --attestation model.dsse.json --key k --store-root ./trusted
-$ mig promote ./mcp --attestation mcp.dsse.json --key k \
-    --opa cli --opa-policy policies/promotion.rego --require-asymmetric
-```
-
-OPA (`mig[opa]`) drives the host `opa` binary; the default path is the stdlib
-embedded floor (offline/airgapped). `s3`/`harbor` store backends are reserved
-extras (the local filesystem store is the default). Exit codes: `0` promoted /
-idempotent · `1` policy denied · `2` operator error · `3` verification failure.
-
-## Attestation & signing (PR7)
-
-`ingest`/`evidence` build an [in-toto Statement v1](https://github.com/in-toto/attestation)
-carrying a MIG vetting predicate, canonicalise it, and sign the
-[DSSE](https://github.com/secure-systems-lab/dsse) Pre-Authentication Encoding.
-The signature lives only in the envelope — never inside the signed payload — and
-the artifact's content digest is the Statement subject, so it is *inside* the
-signed bytes. `verify` fails closed unless the signature is valid, the live
-re-hash matches the attested digest (I3), and every executed gate is attributed
-(I5). The verifier is always operator-chosen (`--signer`/`--key`), never selected
-from the envelope's advisory keyid.
-
-| `--signer` | needs | notes |
+| Purpose | Default (stdlib) | Opt-in |
 |---|---|---|
-| `hmac` (default) | nothing (stdlib) | offline/airgapped; **integrity-only**, not third-party provenance — `verify` says so |
-| `ed25519` | `pip install mig[signing]` | publicly verifiable, promotion-grade |
-| `cosign` | the `cosign` binary on `PATH` | `--key` file/KMS over the same PAE (keyless/Fulcio is a non-goal) |
+| Attestation signing | HMAC-SHA256 (`--signer hmac`) — integrity-only | `ed25519` (`mig[signing]`) · `cosign` binary |
+| Behavioural sandbox | `NoopSandbox` (loud SKIPPED) | Docker / gVisor (`docker` binary) |
+| Promotion policy | embedded safety floor | OPA (`mig[opa]`, `opa` binary) — **deny-overrides only** |
+| Trusted store | local content-addressed filesystem | `s3` / `harbor` (reserved) |
+| Fetch sources | local path | Hugging Face (`mig[huggingface]`) |
+| Scanners | — | picklescan (`mig[scanners]`) |
+| Policy files | JSON | YAML (`mig[policy]`) |
 
 ## Development
 
@@ -146,23 +257,26 @@ Requires Python ≥ 3.11 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync                 # create the env from the locked, hashed dep set
-uv run pytest           # tests
+uv run pytest           # tests (279 passing)
 uv run mypy             # strict type-check
 uv run ruff check .     # lint
 uv run ruff format .    # format
 ```
 
+CI (`.github/workflows/ci.yml`) runs all four checks on Python 3.11–3.13 plus a
+build·smoke job, on every PR.
+
 ## Build plan
 
-Implemented in PR order; each PR leaves the system green and exercisable.
-The system stays decision-only until PR8.
+Built one PR at a time; each PR leaves the system green and exercisable. The
+system stays decision-only until PR8 introduces gated promotion. **All landed:**
 
 - **PR1** — Core contracts & scaffolding ✓
 - **PR2** — Pipeline runner + walking skeleton (`mig scan` end-to-end) ✓
 - **PR3** — Quarantine + digest-pinned fetch + Hugging Face source ✓
 - **PR4** — Static scanner suite (picklescan, AST static-code, secrets, license, prompt-injection) ✓
 - **PR5** — Declarative policy engine (`--policy` / `--fail-on` / `mig policy test`) ✓
-- **PR6** — Behavioral sandbox (Docker → gVisor/Firecracker) ✓
+- **PR6** — Behavioral sandbox (Docker → gVisor) ✓
 - **PR7** — Attestation & signing (in-toto Statement + DSSE; HMAC / ed25519 / cosign) ✓
 - **PR8** — Gated trusted-store promotion (embedded floor + OPA deny-overrides) ✓
 
