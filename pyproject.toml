@@ -49,6 +49,14 @@ signing = ["cryptography>=43,<46"]
 # PR7 cosign: a marker extra — the cosign signer drives the host `cosign` binary
 # via subprocess and needs NO Python dependency (like the PR6 docker sandbox).
 cosign = []
+# PR8 opa: a marker extra — the OPA promotion gate drives the host `opa` binary
+# via subprocess and needs NO Python dependency. The default promotion path is the
+# stdlib embedded floor; OPA only further restricts it (deny-overrides).
+opa = []
+# PR8 trusted-store backends — DECLARED but DEFERRED. The local-fs store is the
+# stdlib default; s3/harbor lazy-raise an install hint until implemented.
+s3 = ["boto3>=1.34,<2"]
+harbor = ["oras>=0.2,<1"]
 
 [project.urls]
 Homepage = "https://github.com/acidoom/mig"
@@ -139,6 +147,9 @@ select = [
 # The cosign signer intentionally shells out to the `cosign` CLI (S404/S603/S607);
 # argv is MIG-controlled and never shell-interpreted (mirrors docker.py).
 "src/mig/evidence/signers/cosign.py" = ["S404", "S603", "S607"]
+# The OPA promotion gate intentionally shells out to the `opa` CLI (S404/S603/S607);
+# argv is MIG-controlled and the input doc is fed on stdin, never shell-interpreted.
+"src/mig/promotion/opa/cli.py" = ["S404", "S603", "S607"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -114,6 +114,15 @@ def verify_attestation(
 
         # (2) digest re-bind (I3) — recompute the live digest, compare to subject.
         subject = subject_digest(statement)
+        # The predicate carries its own ``digest`` field; it MUST be a string and
+        # equal the signed subject. Otherwise a divergent/non-string predicate
+        # digest (still signed) would later mislabel the receipt/URI or crash a
+        # consumer — bind it here so a mismatch is a verification failure.
+        if not (
+            isinstance(attestation.digest, str)
+            and digests_match(attestation.digest, subject)
+        ):
+            raise ValueError("predicate digest does not match the signed subject")
         live = hash_tree(artifact.quarantine_path, artifact.files)
         checks["digest_rebind"] = digests_match(live, subject)
         if not checks["digest_rebind"]:
