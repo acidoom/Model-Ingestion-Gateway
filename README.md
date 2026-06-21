@@ -1,4 +1,4 @@
-# MIG — Model Ingestion Gateway
+# MIG: Model Ingestion Gateway
 
 > Vet AI models, packages, and artifacts **before** they enter trusted infrastructure.
 
@@ -6,19 +6,19 @@ MIG is a pure-Python, embeddable library that treats public sources (Hugging
 Face, GitHub, PyPI, npm, OCI registries) as **untrusted** and runs every artifact
 through a composable, **fail-closed** gate pipeline that lands it in quarantine,
 inspects it, and produces a **categorical, type-aware verdict** plus a **signed
-attestation** — the traceability artifact for compliance (EU AI Act / NIS2 / GxP).
+attestation**, the traceability artifact for compliance (EU AI Act / NIS2 / GxP).
 Nothing reaches trusted infrastructure until it has passed every gate and been
 **signed and promoted** through a separate, gated step.
 
 It ships as a library so the same vetting logic runs as a CLI, a CI gate, a
 Kubernetes admission controller, or an embedded guard inside an agent/MLOps
-platform — without coupling to any one deployment.
+platform, without coupling to any one deployment.
 
 The **core is stdlib-only** (zero runtime dependencies); every integration is an
 opt-in extra. Apache-2.0.
 
 <p align="center">
-  <img src="docs/overview.png" alt="MIG overview — untrusted sources → quarantined gateway (seven gates) → signed promotion → trusted platform" width="640">
+  <img src="docs/overview.png" alt="MIG overview: untrusted sources → quarantined gateway (seven gates) → signed promotion → trusted platform" width="640">
 </p>
 
 ## Reference architecture
@@ -27,10 +27,10 @@ Public registries are Zone 1 (untrusted, pull-only). The gateway (Zone 2) is a
 quarantined DMZ running a sequential, fail-closed inspection pipeline; only a
 clean pass is signed and promoted into the trusted platform (Zone 3).
 
-![Model Ingestion Gateway — reference architecture: three zones, a G1–G7 inspection pipeline, and cross-cutting SIEM / OPA / Keycloak](docs/architecture.png)
+![Model Ingestion Gateway reference architecture: three zones, a G1–G7 inspection pipeline, and cross-cutting SIEM / OPA / Keycloak](docs/architecture.png)
 
 > The diagram is the **reference deployment architecture**. This repository is the
-> **gateway core** — it implements the quarantine, gates **G2–G6**, the signed
+> **gateway core**: it implements the quarantine, gates **G2–G6**, the signed
 > attestation, and the gated promotion. **G1** (provenance/reputation) and **G7**
 > (human review) are integration points the categorical verdict routes to
 > (`review_required`); Harbor / Keycloak / SIEM are reference deployment
@@ -50,7 +50,7 @@ clean pass is signed and promoted into the trusted platform (Zone 3).
 A clean safetensors model, end to end. (The banner is stderr-only and
 TTY-gated; pipe stdout and you get clean JSON. Set `MIG_NO_BANNER=1` to silence it.)
 
-### 1 · Scan — decision-only verdict
+### 1 · Scan: decision-only verdict
 
 ```console
 $ mig scan ./sentiment-model
@@ -75,7 +75,7 @@ $ mig scan ./sentiment-model
 }
 ```
 
-The default `NoopSandbox` emits a **loud `SKIPPED`** (I7) — an APPROVE is never
+The default `NoopSandbox` emits a **loud `SKIPPED`** (I7); an APPROVE is never
 silently "behaviorally vetted". Scan the *same* artifact as an executable type and
 it can never auto-approve at static-only rigor (I8):
 
@@ -85,7 +85,7 @@ $ mig scan ./sentiment-model --type mcp_server --compact
 ```
 
 A **malicious** artifact (a pickle weight that runs `os.system` on load) is
-rejected — `--fail-on reject` makes the exit code non-zero for CI:
+rejected; `--fail-on reject` makes the exit code non-zero for CI:
 
 ```console
 $ mig scan ./evil-model --fail-on reject
@@ -100,7 +100,7 @@ $ mig scan ./evil-model --fail-on reject
 }
 ```
 
-### 2 · Ingest — produce a signed attestation
+### 2 · Ingest: produce a signed attestation
 
 ```console
 $ export MIG_SIGNING_KEY=$(openssl rand -hex 32)
@@ -127,17 +127,17 @@ signature is over the canonical-JSON PAE, and the artifact digest is the
                  "gate_summary": [ /* every gate: status + rigor + scanner_name + scanner_version (I5) */ ] } }
 ```
 
-### 3 · Verify — re-check signature, re-bind digest, fail closed
+### 3 · Verify: re-check signature, re-bind digest, fail closed
 
 ```console
 $ mig verify ./sentiment-model --attestation model.dsse.json --compact
 {"ok": true, "scheme": "hmac-sha256", "keyid": "3b7498245244a4db", "decision": "approve",
  "checks": {"signature": true, "digest_rebind": true, "attribution": true, "keyid": true},
- "warning": "integrity-only (shared-secret HMAC), NOT third-party provenance — use ed25519/cosign across a trust boundary"}
+ "warning": "integrity-only (shared-secret HMAC), NOT third-party provenance; use ed25519/cosign across a trust boundary"}
 # exit 0
 ```
 
-Tamper with one byte of the artifact and verify **fails closed** — the live
+Tamper with one byte of the artifact and verify **fails closed**: the live
 re-hash no longer matches the attested subject (I3), and the exit code is `3`
 (verification failure, distinct from an operator error):
 
@@ -149,7 +149,7 @@ $ mig verify ./sentiment-model --attestation model.dsse.json --compact
 # exit 3
 ```
 
-### 4 · Promote — the gated write into the trusted store
+### 4 · Promote: the gated write into the trusted store
 
 `mig promote` re-verifies the signed attestation, runs the **embedded safety
 floor AND** (optionally) OPA under **deny-overrides**, then writes atomically into
@@ -192,7 +192,7 @@ mig promote <ref>         gated write into the trusted store                --at
 
 ## Using MIG as a library (Python)
 
-MIG is a library first — the CLI is a thin wrapper. Embed the same vetting logic
+MIG is a library first; the CLI is a thin wrapper. Embed the same vetting logic
 in a CI step, a Kubernetes admission webhook, or an agent/MLOps guard. The
 snippets below run against the real API and the inline comments show their actual
 output (the Docker example needs a daemon and is illustrative).
@@ -217,10 +217,10 @@ verdict = run_pipeline(artifact, default_gates(), ctx)
 print(verdict.decision.value)        # 'approve'
 print(verdict.rigor_summary().value) # 'static'
 print(artifact.digest)               # 'sha256:96fc78750744eb81520be011be3f84265bc345f384481102b69551647a53205e'
-print(verdict.behavioral_ran())      # False  (default NoopSandbox — loud SKIPPED, I7)
+print(verdict.behavioral_ran())      # False  (default NoopSandbox, loud SKIPPED, I7)
 ```
 
-### Apply a stricter policy (a safety floor — rules can only escalate)
+### Apply a stricter policy (a safety floor: rules can only escalate)
 
 ```python
 from mig.policy.schema import Policy, PolicyRule, PolicyAction
@@ -322,17 +322,17 @@ print(result.outcome, result.exit_code, result.store_uri)
 ```
 
 `promote_artifact` re-runs verification and the deny-overrides gate *before* the
-single store write, and never raises — it returns a `PromotionResult` with the
+single store write, and never raises: it returns a `PromotionResult` with the
 contract exit code (`0/1/2/3`) and always audits the attempt.
 
-## Design invariants (non-negotiable — encoded as tests)
+## Design invariants (non-negotiable, encoded as tests)
 
 | # | Invariant |
 |---|---|
 | I1 | Static gates never import / `exec` / deserialize an artifact in-process. |
 | I2 | Format headers are parsed without deserializing tensor data, hardened against adversarial input. |
 | I3 | Sources pin + verify the digest/SHA at fetch and land bytes in **quarantine**. |
-| I4 | The verdict is **categorical and type-aware** — never a bare bool or score threshold. |
+| I4 | The verdict is **categorical and type-aware**, never a bare bool or score threshold. |
 | I5 | Every attestation encodes per-gate status + rigor + scanner version, plus overall confinement. |
 | I6 | `ingest()` stops at the decision; `promote()` is a separate, gated call (and the only trusted-store writer). |
 | I7 | The default `NoopSandbox` emits a **loud** `SKIPPED` behavioral result. |
@@ -347,12 +347,12 @@ opt-in and drive host CLIs (no Python dependency):
 
 | Purpose | Default (stdlib) | Opt-in |
 |---|---|---|
-| Attestation signing | HMAC-SHA256 (`--signer hmac`) — integrity-only | `ed25519` (`mig[signing]`) · `cosign` binary |
+| Attestation signing | HMAC-SHA256 (`--signer hmac`), integrity-only | `ed25519` (`mig[signing]`) · `cosign` binary |
 | Behavioural sandbox | `NoopSandbox` (loud SKIPPED) | Docker / gVisor (`docker` binary) |
-| Promotion policy | embedded safety floor | OPA (`mig[opa]`, `opa` binary) — **deny-overrides only** |
+| Promotion policy | embedded safety floor | OPA (`mig[opa]`, `opa` binary), **deny-overrides only** |
 | Trusted store | local content-addressed filesystem | `s3` / `harbor` (reserved) |
 | Fetch sources | local path | Hugging Face (`mig[huggingface]`) |
-| Scanners | — | picklescan (`mig[scanners]`) |
+| Scanners | none | picklescan (`mig[scanners]`) |
 | Policy files | JSON | YAML (`mig[policy]`) |
 
 ## Development
@@ -375,14 +375,14 @@ build·smoke job, on every PR.
 Built one PR at a time; each PR leaves the system green and exercisable. The
 system stays decision-only until PR8 introduces gated promotion. **All landed:**
 
-- **PR1** — Core contracts & scaffolding ✓
-- **PR2** — Pipeline runner + walking skeleton (`mig scan` end-to-end) ✓
-- **PR3** — Quarantine + digest-pinned fetch + Hugging Face source ✓
-- **PR4** — Static scanner suite (picklescan, AST static-code, secrets, license, prompt-injection) ✓
-- **PR5** — Declarative policy engine (`--policy` / `--fail-on` / `mig policy test`) ✓
-- **PR6** — Behavioral sandbox (Docker → gVisor) ✓
-- **PR7** — Attestation & signing (in-toto Statement + DSSE; HMAC / ed25519 / cosign) ✓
-- **PR8** — Gated trusted-store promotion (embedded floor + OPA deny-overrides) ✓
+- **PR1**: Core contracts & scaffolding ✓
+- **PR2**: Pipeline runner + walking skeleton (`mig scan` end-to-end) ✓
+- **PR3**: Quarantine + digest-pinned fetch + Hugging Face source ✓
+- **PR4**: Static scanner suite (picklescan, AST static-code, secrets, license, prompt-injection) ✓
+- **PR5**: Declarative policy engine (`--policy` / `--fail-on` / `mig policy test`) ✓
+- **PR6**: Behavioral sandbox (Docker → gVisor) ✓
+- **PR7**: Attestation & signing (in-toto Statement + DSSE; HMAC / ed25519 / cosign) ✓
+- **PR8**: Gated trusted-store promotion (embedded floor + OPA deny-overrides) ✓
 
 ## License
 
