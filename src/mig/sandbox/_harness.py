@@ -126,7 +126,14 @@ def detonate(artifact_dir: str) -> dict[str, Any]:
     _install_network_recorder()
     loaded: list[str] = []
     errors: list[dict[str, str]] = []
-    for root, _dirs, files in os.walk(artifact_dir):
+
+    def _on_walk_error(exc: OSError) -> None:
+        # Surface a read/traversal failure (e.g. an unreadable mount) instead of
+        # os.walk's default silent skip — a silent skip would look like a clean
+        # detonation. The host treats a wholly-empty observation as fail-closed.
+        errors.append({"file": "<walk>", "error": f"{type(exc).__name__}: {exc}"[:200]})
+
+    for root, _dirs, files in os.walk(artifact_dir, onerror=_on_walk_error):
         for name in sorted(files):
             path = os.path.join(root, name)
             rel = os.path.relpath(path, artifact_dir)

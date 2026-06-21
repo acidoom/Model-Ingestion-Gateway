@@ -8,6 +8,7 @@ integration test runs a real container and is skipped without a daemon.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -85,10 +86,25 @@ def test_run_args_are_deny_by_default(
     assert "--cap-drop ALL" in args
     assert "no-new-privileges:true" in args  # explicit form (gVisor-safe)
     assert "--pids-limit 256" in args
-    assert "--tmpfs /tmp:rw,size=64m" in args  # bounded scratch
+    assert f"--tmpfs {docker_mod._TMPFS_MOUNT}" in args  # bounded scratch
+    assert "size=64m" in args and "mode=1777" in args
     assert "--rm" in args
     assert "timeout -s KILL" in args  # authoritative in-container wall-clock bound
     assert ":/artifact:ro" in args  # artifact mounted read-only
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "getuid"), reason="POSIX-only: container runs as the host uid"
+)
+def test_runs_non_root_as_quarantine_owner(
+    monkeypatch: pytest.MonkeyPatch, ctx: DefaultScanContext
+) -> None:
+    # cap-drop ALL strips CAP_DAC_READ_SEARCH, so a root container can't read the
+    # 0700 quarantine mount — run as the owning uid (also non-root: defense in depth).
+    captured: list[list[str]] = []
+    _patch_run(monkeypatch, capture=captured)
+    DockerSandbox().detonate(make_artifact(), SandboxSpec(), ctx)
+    assert f"--user {os.getuid()}:{os.getgid()}" in " ".join(captured[0])
 
 
 def test_gvisor_runtime_is_requested_and_labelled(
@@ -198,6 +214,26 @@ def test_malformed_observation_fails_closed(
     assert any(f.code == "behavioral_malformed_observation" for f in result.findings)
 
 
+def test_empty_observation_with_files_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, ctx: DefaultScanContext
+) -> None:
+    """A wholly-empty observation (no file seen) for an artifact that HAS files
+    means it was never actually loaded → ERROR, never a clean behavioral pass.
+    This is the regression guard for the cap-drop/unreadable-mount class of bug.
+    """
+    empty: dict[str, object] = {
+        "network_attempts": [],
+        "dns_queries": [],
+        "loaded": [],
+        "errors": [],
+    }
+    _patch_run(monkeypatch, observation=empty)
+    result = DockerSandbox().detonate(make_artifact(), SandboxSpec(), ctx)
+    assert result.status is GateStatus.ERROR
+    assert result.rigor is RigorLevel.NONE
+    assert any(f.code == "behavioral_artifact_unreadable" for f in result.findings)
+
+
 def test_dns_only_lookup_is_surfaced_but_passes(
     monkeypatch: pytest.MonkeyPatch, ctx: DefaultScanContext
 ) -> None:
@@ -285,7 +321,7 @@ def test_emit_manifest_is_hardened() -> None:
     assert manifest["cap_drop"] == ["ALL"]
     assert manifest["runtime"] == "runsc"
     # No drift weaker than the inline run (M3): bounded tmpfs, workdir, ephemeral.
-    assert manifest["tmpfs"] == ["/tmp:rw,size=64m"]
+    assert manifest["tmpfs"] == [docker_mod._TMPFS_MOUNT]
     assert manifest["workdir"] == "/tmp"
     assert manifest["auto_remove"] is True
     command = manifest["command"]

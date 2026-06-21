@@ -55,11 +55,29 @@ DEFAULT_IMAGE = "python:3.12-slim"
 _ARTIFACT_MOUNT = "/artifact"
 
 #: Size-bounded writable scratch — required because the rootfs is read-only.
-_TMPFS_MOUNT = "/tmp:rw,size=64m"
+#: ``mode=1777`` so the non-root detonation user (see _run_as_user_spec) can use
+#: it as HOME; ``noexec``/``nosuid`` keep it from being an execution staging area.
+_TMPFS_MOUNT = "/tmp:rw,noexec,nosuid,size=64m,mode=1777"
 
 
 class DockerUnavailableError(RuntimeError):
     """Raised when the Docker CLI/daemon cannot be reached."""
+
+
+def _run_as_user_spec() -> str | None:
+    """``uid:gid`` to run the container as — the host uid that owns the quarantine.
+
+    The quarantine dir is ``0o700`` owned by the MIG process uid. We drop ALL
+    capabilities, so a root container loses ``CAP_DAC_READ_SEARCH`` and could NOT
+    read that mount. Running as the owning uid both fixes the read and means the
+    detonation runs **non-root** (defense in depth). Returns ``None`` on non-POSIX
+    hosts (e.g. Windows), where we fall back to the image default.
+    """
+    getuid = getattr(os, "getuid", None)
+    getgid = getattr(os, "getgid", None)
+    if getuid is None or getgid is None:
+        return None
+    return f"{getuid()}:{getgid()}"
 
 
 def _run_docker(
@@ -150,6 +168,7 @@ class DockerSandbox:
             "cpus": spec.cpus,
             "timeout_s": spec.timeout_s,
             "env": self._container_env(spec),
+            "user": _run_as_user_spec(),  # non-root; owner of the artifact mount
             "workdir": "/tmp",
             "tmpfs": [_TMPFS_MOUNT],
             "auto_remove": True,  # ephemeral — the runner must not retain it
@@ -202,6 +221,11 @@ class DockerSandbox:
     ) -> list[str]:
         args = ["run", "--rm", "--name", name]
         args += ["--network", spec.network]
+        user = _run_as_user_spec()
+        if user is not None:
+            # Non-root, and the owner of the 0700 quarantine mount (so cap-drop
+            # ALL doesn't make the artifact unreadable). See _run_as_user_spec.
+            args += ["--user", user]
         if spec.read_only:
             args += ["--read-only"]
         for capability in spec.cap_drop:
@@ -255,7 +279,9 @@ class DockerSandbox:
             )
         if exit_code is not None and "Cannot connect to the Docker daemon" in _stderr:
             return _error_observation("sandbox_unavailable", _stderr.strip()[:200])
-        return _observation_from_stdout(stdout, exit_code, token)
+        return _observation_from_stdout(
+            stdout, exit_code, token, expected_files=len(artifact.files)
+        )
 
     def _force_remove(self, name: str) -> None:
         with contextlib.suppress(DockerUnavailableError):  # best-effort teardown
@@ -297,7 +323,7 @@ def _extract_observation(stdout: str, token: str) -> dict[str, Any] | None:
 
 
 def _observation_from_stdout(
-    stdout: str, exit_code: int | None, token: str
+    stdout: str, exit_code: int | None, token: str, expected_files: int = 0
 ) -> SandboxObservation:
     parsed = _extract_observation(stdout, token)
     if parsed is None:
@@ -335,6 +361,30 @@ def _observation_from_stdout(
             exit_code=exit_code,
         )
     dns = [str(q) for q in dns_raw]
+    # Fail-closed: if the artifact has files but the harness observed absolutely
+    # nothing — no file loaded, no error, no network/DNS — it never actually read
+    # the artifact (e.g. an unreadable mount). That must NOT be a clean behavioral
+    # PASS an executable could ride to APPROVE.
+    loaded = parsed.get("loaded") or []
+    errs = parsed.get("errors") or []
+    if expected_files and not (loaded or errs or attempts or dns):
+        return SandboxObservation(
+            rigor=RigorLevel.NONE,
+            status=GateStatus.ERROR,
+            findings=[
+                Finding(
+                    gate_id="behavioral",
+                    severity=Severity.MEDIUM,
+                    code="behavioral_artifact_unreadable",
+                    message=(
+                        f"detonation observed none of the artifact's {expected_files} "
+                        "file(s) — it was not actually loaded"
+                    ),
+                )
+            ],
+            exit_code=exit_code,
+            raw=parsed,
+        )
     findings: list[Finding] = []
     if attempts:
         addresses = [a.get("address") for a in attempts if isinstance(a, dict)]
