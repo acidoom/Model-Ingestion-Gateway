@@ -224,3 +224,102 @@ def test_scan_artifact_with_symlink_errors(
     code, _out, err = _run(["scan", str(model)], capsys)
     assert code == 2  # QuarantineError surfaces as a clean failure
     assert "symlink" in err
+
+
+# --- PR5: --policy / --fail-on / policy test -------------------------------- #
+
+
+def test_scan_with_policy_changes_decision(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    model = make_model_dir(tmp_path)  # clean → baseline APPROVE
+    policy = tmp_path / "p.yaml"
+    policy.write_text(
+        "id: p\nversion: 1\nrules:\n"
+        "  - id: flag_all_models\n"
+        "    when: {artifact.type: model}\n"
+        "    action: reject\n"
+        "    severity: high\n"
+    )
+    _code, out, _ = _run(["scan", str(model), "--policy", str(policy)], capsys)
+    assert json.loads(out)["decision"] == "reject"
+
+
+def test_fail_on_reject_exit_codes(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad, _o, _e = _run(
+        ["scan", str(make_pickle_model_dir(tmp_path)), "--fail-on", "reject"], capsys
+    )
+    assert bad == 1
+    ok, _o2, _e2 = _run(
+        ["scan", str(make_model_dir(tmp_path)), "--fail-on", "reject"], capsys
+    )
+    assert ok == 0
+
+
+def test_fail_on_review_exit_code(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _o, _e = _run(
+        ["scan", str(make_trust_remote_code_dir(tmp_path)), "--fail-on", "review"],
+        capsys,
+    )
+    assert code == 1  # trust_remote_code → review_required → fails the review gate
+
+
+def test_policy_test_reports_matched_rules(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    model = make_model_dir(tmp_path)
+    policy = tmp_path / "p.json"
+    policy.write_text(
+        json.dumps(
+            {
+                "id": "p",
+                "version": "1",
+                "rules": [
+                    {
+                        "id": "flag_models",
+                        "when": {"artifact.type": "model"},
+                        "action": "require_review",
+                        "severity": "medium",
+                    }
+                ],
+            }
+        )
+    )
+    code, out, _ = _run(["policy", "test", str(model), "--policy", str(policy)], capsys)
+    assert code == 0
+    report: dict[str, Any] = json.loads(out)
+    assert report["decision"] == "review_required"
+    assert [r["id"] for r in report["matched_rules"]] == ["flag_models"]
+
+
+def test_scan_bad_policy_errors(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("id: p\nrules:\n  - id: r\n    action: nope\n")
+    code, _out, err = _run(
+        ["scan", str(make_model_dir(tmp_path)), "--policy", str(bad)], capsys
+    )
+    assert code == 2
+    assert "nope" in err or "action" in err
+
+
+def test_scan_eval_invalid_policy_errors_cleanly(
+    tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Schema-valid but references an unknown condition → eval-time PolicyError.
+    # Must exit 2 (operator error) with a message, not a traceback / exit 1.
+    bad = tmp_path / "evalbad.yaml"
+    bad.write_text(
+        "id: p\nversion: 1\nrules:\n"
+        "  - id: r\n    when: {bogus.cond: x}\n    action: reject\n    severity: high\n"
+    )
+    code, _out, err = _run(
+        ["scan", str(make_model_dir(tmp_path)), "--policy", str(bad)], capsys
+    )
+    assert code == 2
+    assert "bogus" in err or "unknown" in err

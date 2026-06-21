@@ -23,9 +23,8 @@ def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
 @pytest.mark.parametrize(
     ("command", "pr"),
     [
-        ("ingest", "PR5"),
+        ("ingest", "PR7"),
         ("verify", "PR7"),
-        ("policy", "PR5"),
         ("evidence", "PR7"),
         ("promote", "PR8"),
     ],

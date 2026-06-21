@@ -41,6 +41,7 @@ dynamic = ["version"]
 # the PR that wires it and is locked + hash-pinned in uv.lock.
 huggingface = ["huggingface-hub>=0.26,<1"]
 scanners = ["picklescan>=0.0.21,<2"]
+policy = ["pyyaml>=6,<7"]
 
 [project.urls]
 Homepage = "https://github.com/acidoom/mig"
@@ -70,6 +71,8 @@ dev = [
     # Scanners MIG wraps are installed in dev so the test suite exercises real
     # detection against the known-bad fixture corpus (PR4 acceptance).
     "picklescan>=0.0.21,<2",
+    # PyYAML in dev so policy tests load real YAML (PR5).
+    "pyyaml>=6,<7",
 ]
 
 [tool.hatch.version]
@@ -84,6 +87,7 @@ packages = ["src/mig"]
 include = [
     "src/mig",
     "tests",
+    "policies",
     "README.md",
     "LICENSE",
     "NOTICE",
@@ -129,7 +133,13 @@ pretty = true
 # Wrapped third-party scanners ship no type stubs; they are accessed only through
 # narrow wrappers, so treat them as untyped rather than failing strict mode.
 [[tool.mypy.overrides]]
-module = ["huggingface_hub", "huggingface_hub.*", "picklescan", "picklescan.*"]
+module = [
+    "huggingface_hub",
+    "huggingface_hub.*",
+    "picklescan",
+    "picklescan.*",
+    "yaml",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

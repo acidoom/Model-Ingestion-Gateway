@@ -281,6 +281,9 @@ source = { editable = "." }
 huggingface = [
     { name = "huggingface-hub" },
 ]
+policy = [
+    { name = "pyyaml" },
+]
 scanners = [
     { name = "picklescan" },
 ]
@@ -290,6 +293,7 @@ dev = [
     { name = "mypy" },
     { name = "picklescan" },
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "ruff" },
 ]
 
@@ -297,14 +301,16 @@ dev = [
 requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'huggingface'", specifier = ">=0.26,<1" },
     { name = "picklescan", marker = "extra == 'scanners'", specifier = ">=0.0.21,<2" },
+    { name = "pyyaml", marker = "extra == 'policy'", specifier = ">=6,<7" },
 ]
-provides-extras = ["huggingface", "scanners"]
+provides-extras = ["huggingface", "policy", "scanners"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy", specifier = ">=1.13,<2" },
     { name = "picklescan", specifier = ">=0.0.21,<2" },
     { name = "pytest", specifier = ">=8.3,<9" },
+    { name = "pyyaml", specifier = ">=6,<7" },
     { name = "ruff", specifier = ">=0.8,<1" },
 ]
 
