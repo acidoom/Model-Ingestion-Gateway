@@ -29,6 +29,20 @@ def read_text(
         return None
 
 
+def has_shebang(quarantine_path: str, rel: str) -> bool:
+    """True if ``rel`` begins with a ``#!`` shebang (bounded 2-byte read).
+
+    Reads raw bytes (no decode, no execution) so an extensionless script is still
+    recognised as runnable regardless of its size. I1-safe: read-only via
+    :func:`~mig.storage.quarantine.safe_join`.
+    """
+    try:
+        with open(safe_join(quarantine_path, rel), "rb") as handle:
+            return handle.read(2) == b"#!"
+    except OSError:
+        return False
+
+
 def read_config_json(quarantine_path: str, files: list[str]) -> dict[str, object]:
     """Parse a model ``config.json`` as bounded text (``{}`` if absent/bad)."""
     for rel in files:

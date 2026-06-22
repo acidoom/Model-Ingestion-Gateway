@@ -2,8 +2,8 @@
 
 Gates wrap scanners. The suite: format-allowlist + digest (PR2); behavioral
 (PR2/PR6); serialization-safety (wraps picklescan), static-code (AST), secrets,
-license/metadata, prompt-injection (PR4). The :class:`~mig.core.protocols.Gate`
-seam they implement lives in PR1.
+license/metadata, prompt-injection (PR4); agent-skill (skill-aware). The
+:class:`~mig.core.protocols.Gate` seam they implement lives in PR1.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from mig.gates.license_metadata import LicenseMetadataGate
 from mig.gates.prompt_injection import PromptInjectionGate
 from mig.gates.secrets import SecretsGate
 from mig.gates.serialization_safety import SerializationSafetyGate
+from mig.gates.skill import SkillGate
 from mig.gates.static_code import StaticCodeGate
 
 if TYPE_CHECKING:
@@ -37,6 +38,7 @@ def default_gates() -> list[Gate]:
         LicenseMetadataGate(),
         StaticCodeGate(),
         PromptInjectionGate(),
+        SkillGate(),
         BehavioralGate(),
     ]
 
@@ -49,6 +51,7 @@ __all__ = [
     "SecretsGate",
     "LicenseMetadataGate",
     "PromptInjectionGate",
+    "SkillGate",
     "BehavioralGate",
     "default_gates",
 ]
