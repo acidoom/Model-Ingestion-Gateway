@@ -38,6 +38,10 @@ class ArtifactType(Enum):
 #: MUST NOT receive an ``APPROVE`` decision at static-only rigor — policy must
 #: require behavioral rigor or return ``REVIEW_REQUIRED``. Single source of
 #: truth, consumed by the policy engine (PR5).
+#:
+#: ``AGENT_SKILL`` is included: a skill bundles runnable helper scripts AND a
+#: manifest whose instructions/tool-grants drive an agent, so it must clear the
+#: behavioral sandbox before it can be approved (see :mod:`mig.gates.skill`).
 EXECUTABLE_ARTIFACT_TYPES: frozenset[ArtifactType] = frozenset(
     {
         ArtifactType.MCP_SERVER,
@@ -45,6 +49,7 @@ EXECUTABLE_ARTIFACT_TYPES: frozenset[ArtifactType] = frozenset(
         ArtifactType.NPM_PACKAGE,
         ArtifactType.NOTEBOOK,
         ArtifactType.CONTAINER_IMAGE,
+        ArtifactType.AGENT_SKILL,
     }
 )
 

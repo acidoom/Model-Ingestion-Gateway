@@ -77,6 +77,7 @@ secrets = "mig.gates.secrets:SecretsGate"
 license_metadata = "mig.gates.license_metadata:LicenseMetadataGate"
 static_code = "mig.gates.static_code:StaticCodeGate"
 prompt_injection = "mig.gates.prompt_injection:PromptInjectionGate"
+agent_skill = "mig.gates.skill:SkillGate"
 behavioral = "mig.gates.behavioral:BehavioralGate"
 
 [dependency-groups]

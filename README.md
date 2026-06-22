@@ -39,7 +39,7 @@ clean pass is signed and promoted into the trusted platform (Zone 3).
 | Reference gate | MIG implementation | Module / command |
 |---|---|---|
 | G2 · Format allowlist | safetensors/GGUF allow, pickle weights rejected | `gates/format_allowlist` |
-| G3 · Static analysis | picklescan + AST static-code + secrets + license + prompt-injection | `gates/*` |
+| G3 · Static analysis | picklescan + AST static-code + secrets + license + prompt-injection + agent-skill checks | `gates/*` |
 | G4 · Signature & attestation | in-toto Statement v1 + DSSE (HMAC / ed25519 / cosign) | `mig ingest` / `verify` |
 | G5 · Behavioural sandbox | confined Docker / gVisor detonation, egress-blocked | `sandbox/docker` |
 | G6 · Policy gate | declarative safety-floor engine; OPA at promotion | `policy/` · `promotion/` |
@@ -83,6 +83,11 @@ it can never auto-approve at static-only rigor (I8):
 $ mig scan ./sentiment-model --type mcp_server --compact
 {... "decision": "review_required"}
 ```
+
+Executable types are MCP servers, Python/npm packages, notebooks, container
+images, and **agent skills** (`--type agent_skill`). Skills get a dedicated gate
+that parses `SKILL.md` and flags dangerous tool grants (`Bash`/wildcard) and
+bundled executables, and they must clear the behavioral sandbox to be approved.
 
 A **malicious** artifact (a pickle weight that runs `os.system` on load) is
 rejected; `--fail-on reject` makes the exit code non-zero for CI:

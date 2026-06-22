@@ -307,7 +307,9 @@ def test_promotion_default_path_is_stdlib_only() -> None:
 
 
 def test_executable_artifact_types_match_spec() -> None:
-    """I8: the executable-types set is exactly the spec's five."""
+    """I8: the executable-types set is exactly the code-bearing types — the spec's
+    five plus AGENT_SKILL (a skill bundles runnable scripts + agent-driving
+    instructions, so it must clear behavioral rigor before APPROVE)."""
     assert (
         frozenset(
             {
@@ -316,6 +318,7 @@ def test_executable_artifact_types_match_spec() -> None:
                 ArtifactType.NPM_PACKAGE,
                 ArtifactType.NOTEBOOK,
                 ArtifactType.CONTAINER_IMAGE,
+                ArtifactType.AGENT_SKILL,
             }
         )
         == EXECUTABLE_ARTIFACT_TYPES
